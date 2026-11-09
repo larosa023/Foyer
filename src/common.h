@@ -19,7 +19,7 @@
 #include <cstdint>
 #include <iterator>
 
-#define FOYER_VERSION L"0.1.0"
+#define FOYER_VERSION L"0.2.0"
 
 // Marker placed in dwExtraInfo of every input event Foyer injects, so our own
 // hooks recognise and ignore them.
@@ -34,6 +34,8 @@ constexpr UINT WM_FOYER_ICON_READY    = WM_APP + 5;  // lParam: IconResult*
 constexpr UINT WM_FOYER_REFRESH_START = WM_APP + 6;  // re-locate the Start button
 constexpr UINT WM_FOYER_QUIT          = WM_APP + 7;  // exit Foyer (sent by "Foyer.exe --quit")
 constexpr UINT WM_FOYER_START_FOUND   = WM_APP + 8;  // background Start-button scan finished
+constexpr UINT WM_FOYER_UPDATE        = WM_APP + 9;  // updater status changed
+constexpr UINT WM_FOYER_SETTINGS      = WM_APP + 10; // open settings; wParam = page index
 
 // ---- menu.cpp ----
 HWND MenuCreate(HINSTANCE inst);
@@ -41,6 +43,30 @@ void MenuToggle(bool fromMouse, POINT pt);
 void MenuHide();
 bool MenuVisible();
 void MenuReloadConfig();
+void MenuApplySettings();         // theme / layout / behaviour changed
+void MenuSetPreview(bool on);     // live preview while editing appearance
+void MenuRefreshApps();
+HWND MenuWindow();
+
+// ---- settings.cpp ----
+enum SettingsPage { PageGeneral = 0, PageAppearance, PageLayout, PageApps, PageUpdates, PageAbout, PageCount };
+void SettingsOpen(int page = -1);
+void SettingsOnUpdateStatus();    // refresh the Updates page
+bool SettingsIsOpen();
+
+// ---- autoupdate.cpp ----
+void AutoUpdateInit(HWND owner, const wchar_t* cmdLine);
+void AutoUpdateOnStatus();
+void AutoUpdateOnTimer();
+void AutoUpdateApplySettings();
+void AutoUpdateCheckNow();
+void AutoUpdateDownloadNow();
+void AutoUpdateInstallNow();
+bool AutoUpdateAvailable();       // an update is available or ready
+void AutoUpdateOnStarted();       // called once the app is fully running
+constexpr UINT_PTR TIMER_UPDATE_CHECK = 100;
+constexpr UINT_PTR TIMER_HEALTHY = 101;
+void ReleaseInstanceMutex();      // main.cpp
 
 // ---- tray.cpp ----
 void TrayAdd(HWND owner);
@@ -50,7 +76,7 @@ void TrayOnMessage(HWND owner, LPARAM lParam);
 void TrayOnCommand(HWND owner, UINT id);
 bool StartWithWindowsEnabled();
 void SetStartWithWindows(bool on);
-void ApplyDarkMenus();
+void TrayBalloon(const std::wstring& title, const std::wstring& text);
 constexpr UINT TRAY_CMD_FIRST = 40000;
 
 // ---- log.cpp ----

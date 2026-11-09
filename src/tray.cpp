@@ -9,22 +9,10 @@ static bool g_trayAdded = false;
 
 enum TrayCmd : UINT {
     T_OPEN = TRAY_CMD_FIRST, T_ORIGINAL, T_PAUSE, T_STARTUP, T_BUTTON, T_CONFIG, T_LOGS, T_RESCAN, T_UNHIDE, T_QUIT,
+    T_SETTINGS, T_UPDATES,
 };
 
 static const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-
-void ApplyDarkMenus() {
-    // Undocumented but stable since Windows 10 1903: uxtheme ordinals 135/136
-    // switch this process's popup menus to the dark style.
-    HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!ux) return;
-    using SetPreferredAppModeFn = int(WINAPI*)(int);
-    using FlushMenuThemesFn = void(WINAPI*)();
-    auto setMode = reinterpret_cast<SetPreferredAppModeFn>(GetProcAddress(ux, MAKEINTRESOURCEA(135)));
-    auto flush = reinterpret_cast<FlushMenuThemesFn>(GetProcAddress(ux, MAKEINTRESOURCEA(136)));
-    if (setMode) setMode(2 /*ForceDark*/);
-    if (flush) flush();
-}
 
 bool StartWithWindowsEnabled() {
     wchar_t buf[MAX_PATH * 2];
@@ -70,6 +58,18 @@ void TrayAdd(HWND owner) {
     TrayUpdateTip();
 }
 
+void TrayBalloon(const std::wstring& title, const std::wstring& text) {
+    if (!g_trayAdded) return;
+    NOTIFYICONDATAW n = g_nid;
+    n.uFlags = NIF_INFO;
+    wcsncpy_s(n.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(n.szInfo, text.c_str(), _TRUNCATE);
+    n.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | NIIF_RESPECT_QUIET_TIME;
+    n.hBalloonIcon = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                       GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
+    Shell_NotifyIconW(NIM_MODIFY, &n);
+}
+
 void TrayRemove() {
     if (g_trayAdded) Shell_NotifyIconW(NIM_DELETE, &g_nid);
     g_trayAdded = false;
@@ -79,12 +79,14 @@ static void ShowTrayMenu(HWND owner) {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, T_OPEN, L"Open Foyer");
     AppendMenuW(m, MF_STRING, T_ORIGINAL, L"Open Windows Start menu\tCtrl+Win");
+    AppendMenuW(m, MF_STRING, T_SETTINGS, L"Settings\x2026");
+    AppendMenuW(m, MF_STRING, T_UPDATES, AutoUpdateAvailable() ? L"Update available\x2026" : L"Check for updates");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (g_paused ? MF_CHECKED : 0), T_PAUSE, L"Pause Foyer");
     AppendMenuW(m, MF_STRING | (g_interceptStartButton ? MF_CHECKED : 0), T_BUTTON, L"Open Foyer from the Start button");
     AppendMenuW(m, MF_STRING | (StartWithWindowsEnabled() ? MF_CHECKED : 0), T_STARTUP, L"Start with Windows");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, T_CONFIG, L"Edit settings file");
+    AppendMenuW(m, MF_STRING, T_CONFIG, L"Edit settings file (advanced)");
     AppendMenuW(m, MF_STRING, T_LOGS, L"Open data folder (logs)");
     AppendMenuW(m, MF_STRING, T_RESCAN, L"Re-detect Start button");
     AppendMenuW(m, MF_STRING | (g_config.hidden.empty() ? MF_GRAYED : 0), T_UNHIDE, L"Unhide all apps");
@@ -109,6 +111,9 @@ void TrayOnMessage(HWND owner, LPARAM lParam) {
             if (!MenuVisible()) MenuToggle(true, pt);
             break;
         }
+        case NIN_BALLOONUSERCLICK:
+            SettingsOpen(PageUpdates);
+            break;
         case WM_CONTEXTMENU:
         case WM_RBUTTONUP:
             MenuHide();
@@ -130,12 +135,15 @@ void TrayOnCommand(HWND owner, UINT id) {
             g_config.interceptStartButton = !g_config.interceptStartButton;
             g_interceptStartButton = g_config.interceptStartButton;
             ConfigSave();
+            SettingsOnUpdateStatus();
             break;
         case T_STARTUP: SetStartWithWindows(!StartWithWindowsEnabled()); break;
         case T_CONFIG: ShellOpen(L"notepad.exe", (L"\"" + DataDir() + L"\\config.json\"").c_str()); break;
         case T_LOGS: ShellOpen(DataDir().c_str()); break;
         case T_RESCAN: StartButtonRefreshAsync(owner); break;
         case T_UNHIDE: g_config.hidden.clear(); ConfigSave(); MenuReloadConfig(); break;
+        case T_SETTINGS: SettingsOpen(-1); break;
+        case T_UPDATES: SettingsOpen(PageUpdates); if (!AutoUpdateAvailable()) AutoUpdateCheckNow(); break;
         case T_QUIT: DestroyWindow(owner); break;
     }
 }

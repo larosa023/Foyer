@@ -3,8 +3,10 @@
 A fast, clean, fully customizable replacement for the Windows 11 Start menu.
 Part of the larosa023 suite of lightweight Windows apps.
 
-**Status: Phase 1 (v0.1.0)** — Win key + Start button interception with fallbacks,
-search bar, pinned apps, full All apps list, account and power menus, tray icon.
+**Status: v0.2.0** — Win key + Start button interception with fallbacks, search, pinned apps,
+full All apps list, account and power menus, a full settings window, themes (Dark, Light,
+Midnight, Glass, Ember, Ocean, Follow Windows) with acrylic/Mica, three layouts (Modern,
+Classic, Full screen), animations, and a built-in updater with automatic rollback.
 
 ---
 
@@ -45,10 +47,31 @@ code-signed yet: **More info → Run anyway**.
 - Click a **letter** in All apps to jump to another letter
 - Bottom bar: your name (lock / sign out / switch user), Downloads, File Explorer,
   Settings, Power (sleep, hibernate, shut down, restart, restart to BIOS/UEFI)
-- **Ctrl+,** opens `config.json` until the settings window arrives in Phase 3
+- **Ctrl+,**, the sliders icon in the bottom bar, right-clicking empty space, or the tray icon
+  opens **Foyer settings**
 
-Data folder (tray → *Open data folder*): `config.json` (pins, hidden apps, toggles) and
-`foyer.log`.
+## Settings
+
+| Page | What's there |
+|---|---|
+| General | Open with Win key / Start button, pause, start with Windows, greeting, open the original Start menu |
+| Appearance | Theme presets, accent color (or follow Windows), accent glow, Solid / Mica / Acrylic, tint, corner radius, animations, **live preview** |
+| Layout | Modern (grid + list), Classic (single column), Full screen (launcher overlay); position, density, icon size |
+| Apps | Reorder or remove pins, unhide apps, refresh the app list |
+| Updates | Status, check now, download and install, automatic checks and installs, Stable / Beta channel, release notes |
+| About | Version, GitHub, back up and restore all settings to one file, data folder, log, shortcuts |
+
+Everything is stored in `config.json` in the data folder (Settings → About → Open data folder).
+
+## Updates
+
+Foyer checks GitHub Releases for larosa023/Foyer (every 1, 6 or 24 hours, or on demand).
+An update is downloaded, its SHA-256 checked against the release's `SHA256SUMS.txt`, then
+Foyer swaps its exe, restarts, and waits for the new version to report that it started
+properly. If it doesn't within 30 seconds, the previous version is restored and started
+again automatically. Automatic installs never happen while a fullscreen game, video or
+presentation is running. The updater lives in `src/updater.h/.cpp` and is written to be
+dropped into the other larosa023 apps unchanged.
 
 ---
 
@@ -106,7 +129,11 @@ Foyer/
 │  ├─ main.cpp          entry point, single instance, command line (--tray, --quit, --original)
 │  ├─ hook.cpp          Win key + Start button interception and fallbacks
 │  ├─ startbutton.cpp   finds Start button(s) on all taskbars via UI Automation
-│  ├─ menu.cpp          the menu window: layout, drawing, keyboard/mouse, actions
+│  ├─ menu.cpp          the menu window: layouts, drawing, animation, keyboard/mouse, actions
+│  ├─ settings.cpp      the settings window (custom-drawn, Mica, live apply + live preview)
+│  ├─ gfx.cpp/.h        shared Direct2D/DirectWrite helpers and theme presets
+│  ├─ updater.cpp/.h    reusable GitHub Releases updater (verify, swap, relaunch, rollback)
+│  ├─ autoupdate.cpp    Foyer's update policy (schedule, notifications, quiet-time deferral)
 │  ├─ apps.cpp/.h       installed apps (shell AppsFolder: desktop + Store), icons, launching
 │  ├─ power.cpp         sleep / hibernate / shut down / restart / UEFI, lock / sign out / switch user
 │  ├─ tray.cpp          tray icon and quick menu, Start with Windows
@@ -144,8 +171,8 @@ Output: `dist/Foyer.exe`
 - [x] **Phase 1** — interception + fallbacks, search bar, pinned, all apps, power/account menus, tray
 - [ ] **Phase 2** — search: files (own index or Everything), folders, Settings pages, Control Panel,
       calculator, unit conversions, prefix filters (`f:` `s:` `>`), ranking by launch count; Recent
-- [ ] **Phase 3** — themes (Dark, Light, Midnight, Glass, accent themes; Mica/acrylic), layout modes
-      (Classic / Modern / Full-screen), full settings window with live preview, drag-to-reorder pins, folders
-- [ ] **Phase 4** — reusable updater (GitHub Releases, hash check, rollback, Stable/Beta), installer,
-      backup/restore
-- [ ] **Phase 5** — animations, accessibility, performance tuning, "My Apps" auto-detection, UI-access build
+- [x] **Phase 3 (most)** — themes, Mica/acrylic, layout modes, settings window with live preview
+- [ ] Phase 3 remainder — drag-to-reorder pins, pin folders, custom fonts, theme JSON import/export
+- [x] **Phase 4 (most)** — reusable updater with hash check, rollback and Stable/Beta; backup/restore
+- [ ] Phase 4 remainder — installer
+- [ ] **Phase 5** — (animations done) accessibility, performance tuning, "My Apps" auto-detection, UI-access build

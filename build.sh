@@ -9,6 +9,6 @@ $ZIG c++ -target x86_64-windows-gnu -std=c++17 -O2 -s -municode \
   -Wall -Wno-unknown-pragmas -Wno-missing-field-initializers \
   src/*.cpp res/foyer.rc -o dist/Foyer.exe \
   -Wl,--subsystem,windows \
-  -ld2d1 -ldwrite -lole32 -loleaut32 -luuid -ldwmapi -lshcore -lpowrprof -lwtsapi32 -lsecur32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lshlwapi
+  -ld2d1 -ldwrite -lole32 -loleaut32 -luuid -ldwmapi -lshcore -lpowrprof -lwtsapi32 -lsecur32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lshlwapi -lwinhttp -lbcrypt -lcomdlg32
 rm -f dist/Foyer.pdb
 ls -la dist/Foyer.exe
