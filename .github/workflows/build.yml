@@ -1,0 +1,53 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Zig
+        run: pip install ziglang
+
+      - name: Build Foyer.exe
+        run: ./build.sh
+
+      - name: Package
+        run: |
+          cp README.md dist/
+          cd dist
+          zip Foyer-win-x64.zip Foyer.exe README.md
+          sha256sum Foyer.exe Foyer-win-x64.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Foyer-win-x64
+          path: |
+            dist/Foyer.exe
+            dist/SHA256SUMS.txt
+
+      # Pushing a tag like v0.1.0 publishes a GitHub Release with the exe attached.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Foyer-win-x64.zip
+            dist/Foyer.exe
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
