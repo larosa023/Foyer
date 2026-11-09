@@ -41,13 +41,36 @@ jobs:
             dist/Foyer.exe
             dist/SHA256SUMS.txt
 
-      # Pushing a tag like v0.1.0 publishes a GitHub Release with the exe attached.
+      # A release is published automatically when FOYER_VERSION in src/common.h
+      # changes on main (or when a v* tag is pushed). Versions with a "-" such as
+      # 0.3.0-beta.1 are published as pre-releases (the Beta update channel).
+      - name: Decide release
+        id: rel
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(grep -oP 'FOYER_VERSION L"\K[^"]+' src/common.h)
+          TAG="v$VER"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then echo "pre=true" >> "$GITHUB_OUTPUT"; else echo "pre=false" >> "$GITHUB_OUTPUT"; fi
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"; echo "Release $TAG already exists"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"; echo "Will publish $TAG"
+          fi
+
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.rel.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Foyer ${{ steps.rel.outputs.tag }}
+          prerelease: ${{ steps.rel.outputs.pre }}
+          body_path: CHANGELOG-latest.md
           files: |
             dist/Foyer-win-x64.zip
             dist/Foyer.exe
             dist/SHA256SUMS.txt
-          generate_release_notes: true

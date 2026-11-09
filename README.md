@@ -163,8 +163,10 @@ cmake --build build --config Release
 Output: `dist/Foyer.exe`
 
 **GitHub Actions:** every push to `main` builds `Foyer.exe` (download it from the run's
-*Artifacts*). Pushing a tag such as `v0.1.0` also publishes a GitHub Release with
-`Foyer.exe`, a zip and `SHA256SUMS.txt` attached (the hashes the Phase 4 updater will check).
+*Artifacts*). **To ship a release, bump `FOYER_VERSION` in `src/common.h`, update
+`CHANGELOG-latest.md`, and push to `main`** — the workflow publishes `v<version>` with
+`Foyer.exe`, a zip and `SHA256SUMS.txt` (the hashes the updater checks). A version like
+`0.3.0-beta.1` is published as a pre-release, which only Beta-channel users receive.
 
 ## Roadmap
 
