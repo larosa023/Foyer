@@ -19,7 +19,7 @@
 #include <cstdint>
 #include <iterator>
 
-#define FOYER_VERSION L"0.2.0"
+#define FOYER_VERSION L"0.2.1"
 
 // Marker placed in dwExtraInfo of every input event Foyer injects, so our own
 // hooks recognise and ignore them.

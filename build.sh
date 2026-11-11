@@ -2,6 +2,7 @@
 # Cross-compile Foyer.exe from Linux/macOS with Zig (pip install ziglang).
 set -euo pipefail
 cd "$(dirname "$0")"
+./sync-version.sh
 ZIG="${ZIG:-python3 -m ziglang}"
 mkdir -p dist
 $ZIG c++ -target x86_64-windows-gnu -std=c++17 -O2 -s -municode \
