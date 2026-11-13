@@ -6,6 +6,7 @@
 #include <propkey.h>
 #include <algorithm>
 #include <set>
+#include "json.h"
 
 static std::atomic<bool> g_refreshing{false};
 
@@ -77,6 +78,69 @@ static bool ExtractIcon(IShellItem* item, int px, IconResult& out) {
     return true;
 }
 
+
+// ---------------------------------------------------------------- apps without a Start menu shortcut
+// Windows (and the shell's AppsFolder) only knows about apps that have a Start menu shortcut
+// or are Store apps. Portable apps run from Downloads, Documents or a tools folder never
+// show up there. Hangar tracks where every larosa023 app lives, so Foyer adds those too.
+static std::wstring ExeDisplayName(const std::wstring& exe) {
+    std::wstring name;
+    DWORD dummy = 0, size = GetFileVersionInfoSizeW(exe.c_str(), &dummy);
+    if (size) {
+        std::vector<BYTE> buf(size);
+        if (GetFileVersionInfoW(exe.c_str(), 0, size, buf.data())) {
+            struct LangCp { WORD lang, cp; } *tr = nullptr;
+            UINT len = 0;
+            if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation", (void**)&tr, &len) && len >= sizeof(LangCp)) {
+                for (const wchar_t* field : {L"FileDescription", L"ProductName"}) {
+                    wchar_t key[128];
+                    swprintf(key, 128, L"\\StringFileInfo\\%04x%04x\\%ls", tr[0].lang, tr[0].cp, field);
+                    wchar_t* val = nullptr;
+                    UINT vl = 0;
+                    if (VerQueryValueW(buf.data(), key, (void**)&val, &vl) && vl > 1 && val[0]) { name = val; break; }
+                }
+            }
+        }
+    }
+    if (name.empty()) {
+        size_t slash = exe.find_last_of(L"\\/");
+        name = exe.substr(slash == std::wstring::npos ? 0 : slash + 1);
+        if (name.size() > 4 && _wcsicmp(name.c_str() + name.size() - 4, L".exe") == 0) name.resize(name.size() - 4);
+        if (!name.empty()) name[0] = (wchar_t)(uintptr_t)CharUpperW((LPWSTR)(uintptr_t)name[0]);
+    }
+    return name;
+}
+
+static std::vector<std::wstring> HangarAppExes() {
+    std::vector<std::wstring> out;
+    PWSTR local = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) return out;
+    std::wstring path = std::wstring(local) + L"\\Hangar\\locations.json";
+    CoTaskMemFree(local);
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    DWORD size = GetFileSize(h, nullptr), read = 0;
+    std::string bytes(size < 1024 * 1024 ? size : 0, '\0');
+    bool ok = !bytes.empty() && ReadFile(h, &bytes[0], (DWORD)bytes.size(), &read, nullptr);
+    CloseHandle(h);
+    if (!ok) return out;
+    int n = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)read, nullptr, 0);
+    std::wstring text(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)read, &text[0], n);
+    json::Value root;
+    json::Parser parser(text);
+    if (!parser.Parse(root) || root.type != json::Value::Object) return out;
+    for (auto& kv : root.obj) {
+        if (kv.second.type != json::Value::String) continue;
+        std::wstring exe = kv.second.s;
+        // Hangar sometimes stores "dir\\\\App.exe"; collapse doubled separators
+        for (size_t i; (i = exe.find(L"\\\\", 2)) != std::wstring::npos;) exe.erase(i, 1);
+        DWORD attr = GetFileAttributesW(exe.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) out.push_back(exe);
+    }
+    return out;
+}
+
 static DWORD WINAPI RefreshThread(LPVOID p) {
     RefreshArgs* args = static_cast<RefreshArgs*>(p);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -113,6 +177,33 @@ static DWORD WINAPI RefreshThread(LPVOID p) {
             en->Release();
         }
         folder->Release();
+    }
+
+    // Add suite apps that live outside the Start menu (see HangarAppExes).
+    {
+        std::set<std::wstring> knownTargets, knownNames;
+        for (auto& a : result->apps) {
+            if (!a.target.empty()) knownTargets.insert(ToLower(a.target));
+            knownNames.insert(a.nameLower);
+        }
+        int added = 0;
+        for (const std::wstring& exe : HangarAppExes()) {
+            if (knownTargets.count(ToLower(exe))) continue;
+            AppEntry e;
+            e.id = exe;
+            e.target = exe;
+            e.name = ExeDisplayName(exe);
+            e.nameLower = ToLower(e.name);
+            if (e.name.empty() || knownNames.count(e.nameLower)) continue;
+            IShellItem* it = nullptr;
+            if (FAILED(SHCreateItemFromParsingName(exe.c_str(), nullptr, IID_PPV_ARGS(&it))) || !it) continue;
+            knownTargets.insert(ToLower(exe));
+            knownNames.insert(e.nameLower);
+            result->apps.push_back(std::move(e));
+            items.push_back(it);
+            ++added;
+        }
+        if (added) Log(L"Added %d app(s) that have no Start menu shortcut", added);
     }
 
     // Sort alphabetically, keeping items aligned with apps.
@@ -172,14 +263,29 @@ void ShellOpen(const wchar_t* what, const wchar_t* args) {
     if (!ShellExecuteExW(&sei)) Log(L"ShellOpen failed for %ls (error %lu)", what, GetLastError());
 }
 
+static bool IsPathId(const std::wstring& id) { return id.size() > 3 && id[1] == L':' && (id[2] == L'\\' || id[2] == L'/'); }
+
 void AppLaunch(const std::wstring& id) {
+    if (IsPathId(id)) {
+        // An exe outside the Start menu: start it in its own folder.
+        std::wstring dir = id.substr(0, id.find_last_of(L"\\/"));
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.fMask = SEE_MASK_NOASYNC;
+        sei.lpVerb = L"open";
+        sei.lpFile = id.c_str();
+        sei.lpDirectory = dir.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+        Log(L"Launch %ls", id.c_str());
+        if (!ShellExecuteExW(&sei)) Log(L"Launch failed for %ls (error %lu)", id.c_str(), GetLastError());
+        return;
+    }
     std::wstring target = L"shell:AppsFolder\\" + id;
     Log(L"Launch %ls", id.c_str());
     ShellOpen(target.c_str());
 }
 
 static bool InvokeVerb(HWND owner, const std::wstring& id, const char* verb) {
-    std::wstring path = L"shell:AppsFolder\\" + id;
+    std::wstring path = IsPathId(id) ? id : L"shell:AppsFolder\\" + id;
     IShellItem* item = nullptr;
     if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) || !item) return false;
     bool ok = false;

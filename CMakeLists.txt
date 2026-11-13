@@ -14,5 +14,5 @@ if(MSVC)
   target_compile_options(Foyer PRIVATE /W4 /utf-8 /permissive-)
   target_link_options(Foyer PRIVATE /MANIFEST:NO)   # manifest comes from foyer.rc
 endif()
-target_link_libraries(Foyer PRIVATE d2d1 dwrite ole32 oleaut32 uuid dwmapi shcore powrprof wtsapi32 secur32 shell32 user32 gdi32 advapi32 shlwapi winhttp bcrypt comdlg32)
+target_link_libraries(Foyer PRIVATE d2d1 dwrite ole32 oleaut32 uuid dwmapi shcore powrprof wtsapi32 secur32 shell32 user32 gdi32 advapi32 shlwapi winhttp bcrypt comdlg32 version)
 set_target_properties(Foyer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/dist)

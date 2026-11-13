@@ -1,7 +1,4 @@
-## Foyer 0.2.1
+## Foyer 0.2.2
 
 ### Fixed
-- **Hangar kept offering the 0.2.0 update after installing it.** The 0.2.0 exe still said "0.1.0" in its file properties, which Windows and Hangar read. The version is now stamped into the exe automatically on every build, so this can't happen again.
-
-### How to update
-Click **Update** on Foyer in Hangar, or let Foyer's built-in updater install it.
+- **Apps without a Start menu shortcut now show up.** Windows only lists apps that have a Start menu shortcut, so portable apps run from Downloads, Documents or a tools folder were missing from both Foyer and the Windows Start menu. Foyer now also lists every larosa023 app that Hangar knows about, wherever it lives, with its proper name and icon. Search, pinning, Run as administrator and Open file location all work for them.
