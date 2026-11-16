@@ -7,6 +7,84 @@
 Config g_config;
 
 std::wstring ConfigPath() { return DataDir() + L"\\config.json"; }
+std::wstring ThemesDir() { return DataDir() + L"\\themes"; }
+
+std::wstring PinDisplayName(const Pin& p) {
+    if (!p.label.empty()) return p.label;
+    if (!p.name.empty()) return p.name;
+    if (p.type == PinType::Url) {
+        std::wstring h = p.id;
+        size_t s = h.find(L"://");
+        if (s != std::wstring::npos) h = h.substr(s + 3);
+        if (h.compare(0, 4, L"www.") == 0) h = h.substr(4);
+        size_t e = h.find_first_of(L"/?#");
+        return e == std::wstring::npos ? h : h.substr(0, e);
+    }
+    if (p.type == PinType::Group) return L"Folder";
+    std::wstring id = p.id;
+    while (!id.empty() && (id.back() == L'\\' || id.back() == L'/')) id.pop_back();
+    size_t sl = id.find_last_of(L"\\/");
+    std::wstring n = sl == std::wstring::npos ? id : id.substr(sl + 1);
+    if (p.type == PinType::App && n.size() > 4 && _wcsicmp(n.c_str() + n.size() - 4, L".exe") == 0) n.resize(n.size() - 4);
+    return n.empty() ? p.id : n;
+}
+
+static const wchar_t* PinTypeName(PinType t) {
+    switch (t) { case PinType::File: return L"file"; case PinType::Folder: return L"folder"; case PinType::Url: return L"url";
+                 case PinType::Group: return L"group"; default: return L"app"; }
+}
+
+static PinType PinTypeFrom(const std::wstring& s) {
+    if (s == L"file") return PinType::File;
+    if (s == L"folder") return PinType::Folder;
+    if (s == L"url") return PinType::Url;
+    if (s == L"group") return PinType::Group;
+    return PinType::App;
+}
+
+static Pin PinFromJson(const json::Value& v, bool allowGroup) {
+    Pin p;
+    p.id = v.GetStr(L"id");
+    p.name = v.GetStr(L"name");
+    p.type = PinTypeFrom(v.GetStr(L"type", L"app"));
+    p.label = v.GetStr(L"label");
+    p.icon = v.GetStr(L"icon");
+    if (p.type == PinType::Group) {
+        if (!allowGroup) p.type = PinType::App;
+        else if (const json::Value* items = v.Get(L"items"); items && items->type == json::Value::Array)
+            for (auto& c : items->arr) { Pin child = PinFromJson(c, false); if (!child.id.empty()) p.items.push_back(child); }
+    }
+    return p;
+}
+
+static json::Value PinToJson(const Pin& p) {
+    json::Value o = json::Value::MakeObject();
+    if (p.type != PinType::Group) o.Set(L"id", json::Value::Str(p.id));
+    o.Set(L"name", json::Value::Str(p.name));
+    if (p.type != PinType::App) o.Set(L"type", json::Value::Str(PinTypeName(p.type)));
+    if (!p.label.empty()) o.Set(L"label", json::Value::Str(p.label));
+    if (!p.icon.empty()) o.Set(L"icon", json::Value::Str(p.icon));
+    if (p.type == PinType::Group) {
+        json::Value items = json::Value::MakeArray();
+        for (auto& c : p.items) items.arr.push_back(PinToJson(c));
+        o.Set(L"items", items);
+    }
+    return o;
+}
+
+static std::vector<std::wstring> StrList(const json::Value& root, const wchar_t* key, bool* present = nullptr) {
+    std::vector<std::wstring> out;
+    const json::Value* v = root.Get(key);
+    if (present) *present = v && v->type == json::Value::Array;
+    if (v && v->type == json::Value::Array) for (auto& e : v->arr) if (e.type == json::Value::String) out.push_back(e.s);
+    return out;
+}
+
+static json::Value StrArray(const std::vector<std::wstring>& v) {
+    json::Value a = json::Value::MakeArray();
+    for (auto& s : v) a.arr.push_back(json::Value::Str(s));
+    return a;
+}
 
 bool Config::IsHidden(const std::wstring& id) const {
     for (auto& h : hidden) if (_wcsicmp(h.c_str(), id.c_str()) == 0) return true;
@@ -14,7 +92,10 @@ bool Config::IsHidden(const std::wstring& id) const {
 }
 
 bool Config::IsPinned(const std::wstring& id) const {
-    for (auto& p : pins) if (_wcsicmp(p.id.c_str(), id.c_str()) == 0) return true;
+    for (auto& p : pins) {
+        if (p.type != PinType::Group && _wcsicmp(p.id.c_str(), id.c_str()) == 0) return true;
+        for (auto& c : p.items) if (_wcsicmp(c.id.c_str(), id.c_str()) == 0) return true;
+    }
     return false;
 }
 
@@ -51,13 +132,14 @@ static bool WriteUtf8FileAtomic(const std::wstring& path, const std::wstring& te
 }
 
 void ConfigDefaultPins() {
+    auto app = [](const wchar_t* id, const wchar_t* name) { Pin p; p.id = id; p.name = name; return p; };
     g_config.pins = {
-        {L"Microsoft.Windows.Explorer", L"File Explorer"},
-        {L"windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", L"Settings"},
-        {L"Microsoft.WindowsTerminal_8wekyb3d8bbwe!App", L"Terminal"},
-        {L"Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", L"Notepad"},
-        {L"Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", L"Calculator"},
-        {L"Microsoft.Windows.Photos_8wekyb3d8bbwe!App", L"Photos"},
+        app(L"Microsoft.Windows.Explorer", L"File Explorer"),
+        app(L"windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", L"Settings"),
+        app(L"Microsoft.WindowsTerminal_8wekyb3d8bbwe!App", L"Terminal"),
+        app(L"Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", L"Notepad"),
+        app(L"Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", L"Calculator"),
+        app(L"Microsoft.Windows.Photos_8wekyb3d8bbwe!App", L"Photos"),
     };
 }
 
@@ -89,7 +171,21 @@ static void FromJson(const json::Value& root) {
     c.interceptWinKey = root.GetBool(L"interceptWinKey", d.interceptWinKey);
     c.showGreeting = root.GetBool(L"showGreeting", d.showGreeting);
 
-    c.theme = OneOf(root.GetStr(L"theme", d.theme), {L"dark", L"light", L"midnight", L"glass", L"ember", L"ocean", L"system"}, L"dark");
+    c.theme = root.GetStr(L"theme", d.theme);
+    if (c.theme.compare(0, 5, L"file:") != 0)
+        c.theme = OneOf(c.theme, {L"dark", L"light", L"midnight", L"glass", L"ember", L"ocean", L"system"}, L"dark");
+    c.font = root.GetStr(L"font");
+    c.fontScale = std::clamp((float)root.GetNum(L"fontScale", d.fontScale), 0.85f, 1.3f);
+    c.askedInstall = root.GetBool(L"askedInstall", false);
+    c.elevatedMode = root.GetBool(L"elevatedMode", false);
+    c.recentEnabled = root.GetBool(L"recentEnabled", d.recentEnabled);
+    c.hiddenRecent = StrList(root, L"hiddenRecent");
+    c.myAppsGroup = root.GetBool(L"myAppsGroup", d.myAppsGroup);
+    bool hasShortcuts = false;
+    std::vector<std::wstring> sc = StrList(root, L"shortcuts", &hasShortcuts);
+    if (hasShortcuts) c.shortcuts = sc;
+    c.searchFiles = root.GetBool(L"searchFiles", d.searchFiles);
+    c.searchSettings = root.GetBool(L"searchSettings", d.searchSettings);
     c.useWindowsAccent = root.GetBool(L"useWindowsAccent", d.useWindowsAccent);
     c.accentColor = ParseHexColor(root.GetStr(L"accentColor"), d.accentColor);
     c.backdrop = OneOf(root.GetStr(L"backdrop", d.backdrop), {L"solid", L"mica", L"acrylic"}, L"acrylic");
@@ -113,8 +209,8 @@ static void FromJson(const json::Value& root) {
     c.pins.clear();
     if (const json::Value* pins = root.Get(L"pins"); pins && pins->type == json::Value::Array) {
         for (auto& v : pins->arr) {
-            Pin pin{v.GetStr(L"id"), v.GetStr(L"name")};
-            if (!pin.id.empty()) c.pins.push_back(pin);
+            Pin pin = PinFromJson(v, true);
+            if (!pin.id.empty() || pin.type == PinType::Group) c.pins.push_back(pin);
         }
     }
     c.hidden.clear();
@@ -130,6 +226,16 @@ static std::wstring ToJsonText() {
     root.Set(L"interceptWinKey", json::Value::Boolean(c.interceptWinKey));
     root.Set(L"interceptStartButton", json::Value::Boolean(c.interceptStartButton));
     root.Set(L"showGreeting", json::Value::Boolean(c.showGreeting));
+    root.Set(L"askedInstall", json::Value::Boolean(c.askedInstall));
+    root.Set(L"elevatedMode", json::Value::Boolean(c.elevatedMode));
+    root.Set(L"recentEnabled", json::Value::Boolean(c.recentEnabled));
+    root.Set(L"hiddenRecent", StrArray(c.hiddenRecent));
+    root.Set(L"myAppsGroup", json::Value::Boolean(c.myAppsGroup));
+    root.Set(L"shortcuts", StrArray(c.shortcuts));
+    root.Set(L"searchFiles", json::Value::Boolean(c.searchFiles));
+    root.Set(L"searchSettings", json::Value::Boolean(c.searchSettings));
+    root.Set(L"font", json::Value::Str(c.font));
+    root.Set(L"fontScale", json::Value::Num(std::round(c.fontScale * 100) / 100));
     root.Set(L"theme", json::Value::Str(c.theme));
     root.Set(L"useWindowsAccent", json::Value::Boolean(c.useWindowsAccent));
     root.Set(L"accentColor", json::Value::Str(HexColor(c.accentColor)));
@@ -149,12 +255,7 @@ static std::wstring ToJsonText() {
     root.Set(L"lastCheck", json::Value::Num(c.lastCheck));
     root.Set(L"notifiedVersion", json::Value::Str(c.notifiedVersion));
     json::Value pins = json::Value::MakeArray();
-    for (auto& p : c.pins) {
-        json::Value o = json::Value::MakeObject();
-        o.Set(L"id", json::Value::Str(p.id));
-        o.Set(L"name", json::Value::Str(p.name));
-        pins.arr.push_back(o);
-    }
+    for (auto& p : c.pins) pins.arr.push_back(PinToJson(p));
     root.Set(L"pins", pins);
     json::Value hid = json::Value::MakeArray();
     for (auto& h : c.hidden) hid.arr.push_back(json::Value::Str(h));

@@ -1,11 +1,15 @@
 // Foyer - app enumeration, icons and launching
 #include "apps.h"
+#include "system.h"
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <propkey.h>
 #include <algorithm>
 #include <set>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 #include "json.h"
 
 static std::atomic<bool> g_refreshing{false};
@@ -23,19 +27,19 @@ static bool StartsWithI(const std::wstring& s, const wchar_t* prefix) {
     return s.size() >= n && _wcsnicmp(s.c_str(), prefix, n) == 0;
 }
 
-static bool ExtractIcon(IShellItem* item, int px, IconResult& out) {
+static bool ExtractIcon(IShellItem* item, int px, IconResult& out, bool thumbnail = false) {
     IShellItemImageFactory* f = nullptr;
     if (FAILED(item->QueryInterface(IID_PPV_ARGS(&f))) || !f) return false;
     HBITMAP hbm = nullptr;
     SIZE sz{px, px};
-    HRESULT hr = f->GetImage(sz, SIIGBF_ICONONLY | SIIGBF_RESIZETOFIT, &hbm);
+    HRESULT hr = f->GetImage(sz, thumbnail ? (SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK) : (SIIGBF_ICONONLY | SIIGBF_RESIZETOFIT), &hbm);
     f->Release();
     if (FAILED(hr) || !hbm) return false;
 
     BITMAP bm{};
     GetObjectW(hbm, sizeof(bm), &bm);
     int w = bm.bmWidth, h = bm.bmHeight;
-    if (w <= 0 || h <= 0 || w > 512 || h > 512) { DeleteObject(hbm); return false; }
+    if (w <= 0 || h <= 0 || w > 1024 || h > 1024) { DeleteObject(hbm); return false; }
 
     std::vector<uint8_t> src((size_t)w * h * 4);
     BITMAPINFO bi{};
@@ -66,6 +70,25 @@ static bool ExtractIcon(IShellItem* item, int px, IconResult& out) {
             src[i + 1] = (uint8_t)((src[i + 1] * a + 127) / 255);
             src[i + 2] = (uint8_t)((src[i + 2] * a + 127) / 255);
         }
+    }
+
+    // Thumbnails can come back larger than asked: shrink with a box filter.
+    if (thumbnail && (w > px || h > px)) {
+        float scale = (float)px / (float)std::max(w, h);
+        int nw = std::max(1, (int)(w * scale)), nh = std::max(1, (int)(h * scale));
+        std::vector<uint8_t> dst((size_t)nw * nh * 4, 0);
+        for (int y = 0; y < nh; ++y)
+            for (int x = 0; x < nw; ++x) {
+                int x0 = x * w / nw, x1 = std::max(x0 + 1, (x + 1) * w / nw), y0 = y * h / nh, y1 = std::max(y0 + 1, (y + 1) * h / nh);
+                unsigned acc[4] = {0, 0, 0, 0}, n = 0;
+                for (int yy = y0; yy < y1; ++yy) for (int xx = x0; xx < x1; ++xx) {
+                    const uint8_t* sp = &src[((size_t)yy * w + xx) * 4];
+                    for (int c = 0; c < 4; ++c) acc[c] += sp[c];
+                    ++n;
+                }
+                for (int c = 0; c < 4; ++c) dst[((size_t)y * nw + x) * 4 + c] = (uint8_t)(acc[c] / n);
+            }
+        src.swap(dst); w = nw; h = nh;
     }
 
     // Center into a square canvas so every icon is the same size.
@@ -181,17 +204,22 @@ static DWORD WINAPI RefreshThread(LPVOID p) {
 
     // Add suite apps that live outside the Start menu (see HangarAppExes).
     {
+        std::vector<std::wstring> hangar = HangarAppExes();
+        std::set<std::wstring> suiteTargets;
+        for (auto& h : hangar) suiteTargets.insert(ToLower(h));
+        for (auto& a : result->apps) if (!a.target.empty() && suiteTargets.count(ToLower(a.target))) a.suite = true;
         std::set<std::wstring> knownTargets, knownNames;
         for (auto& a : result->apps) {
             if (!a.target.empty()) knownTargets.insert(ToLower(a.target));
             knownNames.insert(a.nameLower);
         }
         int added = 0;
-        for (const std::wstring& exe : HangarAppExes()) {
+        for (const std::wstring& exe : hangar) {
             if (knownTargets.count(ToLower(exe))) continue;
             AppEntry e;
             e.id = exe;
             e.target = exe;
+            e.suite = true;
             e.name = ExeDisplayName(exe);
             e.nameLower = ToLower(e.name);
             if (e.name.empty() || knownNames.count(e.nameLower)) continue;
@@ -254,13 +282,7 @@ void AppsRefreshAsync(HWND notify, std::vector<std::wstring> haveIcons, int icon
 }
 
 void ShellOpen(const wchar_t* what, const wchar_t* args) {
-    SHELLEXECUTEINFOW sei{sizeof(sei)};
-    sei.fMask = SEE_MASK_NOASYNC;
-    sei.lpVerb = L"open";
-    sei.lpFile = what;
-    sei.lpParameters = args;
-    sei.nShow = SW_SHOWNORMAL;
-    if (!ShellExecuteExW(&sei)) Log(L"ShellOpen failed for %ls (error %lu)", what, GetLastError());
+    if (!ShellExecAsUser(what, args ? args : L"", L"")) Log(L"ShellOpen failed for %ls (error %lu)", what, GetLastError());
 }
 
 static bool IsPathId(const std::wstring& id) { return id.size() > 3 && id[1] == L':' && (id[2] == L'\\' || id[2] == L'/'); }
@@ -269,14 +291,8 @@ void AppLaunch(const std::wstring& id) {
     if (IsPathId(id)) {
         // An exe outside the Start menu: start it in its own folder.
         std::wstring dir = id.substr(0, id.find_last_of(L"\\/"));
-        SHELLEXECUTEINFOW sei{sizeof(sei)};
-        sei.fMask = SEE_MASK_NOASYNC;
-        sei.lpVerb = L"open";
-        sei.lpFile = id.c_str();
-        sei.lpDirectory = dir.c_str();
-        sei.nShow = SW_SHOWNORMAL;
         Log(L"Launch %ls", id.c_str());
-        if (!ShellExecuteExW(&sei)) Log(L"Launch failed for %ls (error %lu)", id.c_str(), GetLastError());
+        if (!ShellExecAsUser(id, L"", dir)) Log(L"Launch failed for %ls (error %lu)", id.c_str(), GetLastError());
         return;
     }
     std::wstring target = L"shell:AppsFolder\\" + id;
@@ -337,4 +353,134 @@ void AppUninstall(const std::wstring& id) {
     // Store apps contain "!" in their id (PackageFamilyName!AppId).
     if (id.find(L'!') != std::wstring::npos) ShellOpen(L"ms-settings:appsfeatures");
     else ShellOpen(L"control.exe", L"appwiz.cpl");
+}
+
+// ---------------------------------------------------------------- files, folders, URLs
+void OpenPath(const std::wstring& path) {
+    Log(L"Open %ls", path.c_str());
+    if (!ShellExecAsUser(path, L"", L"")) Log(L"Open failed for %ls (error %lu)", path.c_str(), GetLastError());
+}
+
+void OpenFileLocation(const std::wstring& path) {
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (SUCCEEDED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr)) && pidl) {
+        SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+        CoTaskMemFree(pidl);
+        return;
+    }
+    std::wstring args = L"/select,\"" + path + L"\"";
+    ShellOpen(L"explorer.exe", args.c_str());
+}
+
+std::wstring FileIconKey(const std::wstring& path, bool dir) {
+    if (dir) return L"path:" + ToLower(path);
+    size_t dot = path.find_last_of(L'.');
+    size_t slash = path.find_last_of(L"\\/");
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return L"ext:";
+    std::wstring ext = ToLower(path.substr(dot));
+    // these carry their own icons
+    static const wchar_t* own[] = {L".exe", L".lnk", L".ico", L".url", L".appref-ms", L".msc", L".cpl", L".scr"};
+    for (auto o : own) if (ext == o) return L"path:" + ToLower(path);
+    return L"ext:" + ext;
+}
+
+static std::mutex s_iconLock;
+static std::condition_variable s_iconCv;
+struct IconJob { HWND notify; std::wstring key, parsing; int px; bool thumb; };
+static std::vector<IconJob> s_iconJobs;
+static std::set<std::wstring> s_iconQueued;
+static bool s_iconWorker = false;
+
+static void IconWorker() {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    for (;;) {
+        IconJob job;
+        {
+            std::unique_lock<std::mutex> lk(s_iconLock);
+            s_iconCv.wait(lk, [] { return !s_iconJobs.empty(); });
+            job = s_iconJobs.back();          // newest first: what's on screen now
+            s_iconJobs.pop_back();
+        }
+        IShellItem* item = nullptr;
+        auto* ir = new IconResult();
+        ir->id = job.key;
+        bool ok = false;
+        if (SUCCEEDED(SHCreateItemFromParsingName(job.parsing.c_str(), nullptr, IID_PPV_ARGS(&item))) && item) {
+            ok = ExtractIcon(item, job.px, *ir, job.thumb);
+            item->Release();
+        }
+        if (!ok || !PostMessageW(job.notify, WM_FOYER_ICON_READY, 0, (LPARAM)ir)) delete ir;
+    }
+}
+
+void IconRequest(HWND notify, const std::wstring& key, const std::wstring& parsingName, int px, bool thumbnail) {
+    std::lock_guard<std::mutex> lk(s_iconLock);
+    if (!s_iconQueued.insert(key).second) return;   // asked before (loaded, failed or pending)
+    s_iconJobs.push_back({notify, key, parsingName, px, thumbnail});
+    if (!s_iconWorker) { s_iconWorker = true; std::thread(IconWorker).detach(); }
+    s_iconCv.notify_one();
+}
+
+// ---------------------------------------------------------------- icon cache
+static std::wstring IconCachePath() { return DataDir() + L"\\icons.cache"; }
+
+bool IconCacheLoad(int px, std::vector<CachedIcon>& out, bool* stale) {
+    HANDLE h = CreateFileW(IconCachePath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FILETIME ft{}, now{};
+    GetFileTime(h, nullptr, nullptr, &ft);
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER a{}, b{};
+    a.LowPart = ft.dwLowDateTime; a.HighPart = ft.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime; b.HighPart = now.dwHighDateTime;
+    if (stale) *stale = b.QuadPart > a.QuadPart && (b.QuadPart - a.QuadPart) > 7ULL * 86400ULL * 10000000ULL;
+    DWORD size = GetFileSize(h, nullptr), read = 0;
+    std::vector<uint8_t> buf(size < 64 * 1024 * 1024 ? size : 0);
+    bool ok = !buf.empty() && ReadFile(h, buf.data(), size, &read, nullptr) && read == size;
+    CloseHandle(h);
+    if (!ok || size < 12 || memcmp(buf.data(), "FYI1", 4) != 0) return false;
+    uint32_t cachedPx, count;
+    memcpy(&cachedPx, &buf[4], 4);
+    memcpy(&count, &buf[8], 4);
+    if ((int)cachedPx != px) return false;
+    size_t p = 12;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (p + 2 > size) return false;
+        uint16_t klen; memcpy(&klen, &buf[p], 2); p += 2;
+        if (p + klen * 2 + 2 > size) return false;
+        CachedIcon ci;
+        ci.id.assign((const wchar_t*)&buf[p], klen); p += klen * 2;
+        uint16_t isz; memcpy(&isz, &buf[p], 2); p += 2;
+        size_t bytes = (size_t)isz * isz * 4;
+        if (isz == 0 || isz > 1024 || p + bytes > size) return false;
+        ci.size = isz;
+        ci.pixels.assign(buf.begin() + p, buf.begin() + p + bytes);
+        p += bytes;
+        out.push_back(std::move(ci));
+    }
+    return true;
+}
+
+void IconCacheSave(int px, const std::vector<CachedIcon>& icons) {
+    std::vector<uint8_t> buf;
+    buf.insert(buf.end(), {'F', 'Y', 'I', '1'});
+    uint32_t p32 = (uint32_t)px, count = (uint32_t)icons.size();
+    buf.insert(buf.end(), (uint8_t*)&p32, (uint8_t*)&p32 + 4);
+    buf.insert(buf.end(), (uint8_t*)&count, (uint8_t*)&count + 4);
+    for (auto& ci : icons) {
+        uint16_t klen = (uint16_t)std::min<size_t>(ci.id.size(), 65535), isz = (uint16_t)ci.size;
+        buf.insert(buf.end(), (uint8_t*)&klen, (uint8_t*)&klen + 2);
+        buf.insert(buf.end(), (const uint8_t*)ci.id.data(), (const uint8_t*)ci.id.data() + klen * 2);
+        buf.insert(buf.end(), (uint8_t*)&isz, (uint8_t*)&isz + 2);
+        buf.insert(buf.end(), ci.pixels.begin(), ci.pixels.end());
+    }
+    std::wstring tmp = IconCachePath() + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    bool ok = WriteFile(h, buf.data(), (DWORD)buf.size(), &w, nullptr) && w == buf.size();
+    CloseHandle(h);
+    if (ok) MoveFileExW(tmp.c_str(), IconCachePath().c_str(), MOVEFILE_REPLACE_EXISTING);
+    else DeleteFileW(tmp.c_str());
 }

@@ -23,6 +23,11 @@ jobs:
       - name: Install Zig
         run: pip install ziglang
 
+      - name: Unit tests
+        run: |
+          g++ -std=c++17 -Isrc tests/calc_test.cpp src/calc.cpp -o calc_test
+          ./calc_test
+
       - name: Build Foyer.exe
         run: ./build.sh
 

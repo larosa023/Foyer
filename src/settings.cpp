@@ -4,7 +4,12 @@
 #include "gfx.h"
 #include "updater.h"
 #include "apps.h"
+#include "system.h"
+#include "search.h"
+#include "shortcuts.h"
+#include "inputbox.h"
 #include <commdlg.h>
+#include <shobjidl.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
 #include <functional>
@@ -16,7 +21,7 @@
 using namespace gfx;
 
 // ============================================================ control model
-enum class CType { Header, Toggle, Choice, Slider, Swatches, Buttons, Info, ThemeGrid, LayoutGrid, PinRow, HiddenRow, Notes, UpdateCard, Hero };
+enum class CType { Header, Toggle, Choice, Slider, Swatches, Buttons, Info, ThemeGrid, LayoutGrid, PinRow, HiddenRow, Notes, UpdateCard, Hero, ChipGrid };
 
 struct Ctl {
     CType type;
@@ -59,8 +64,9 @@ static bool g_animTimer = false;
 constexpr UINT_PTR TIMER_SANIM = 1;
 
 static const float kSidebarW = 240;
-static const wchar_t* kPageNames[PageCount] = {L"General", L"Appearance", L"Layout", L"Apps", L"Updates", L"About"};
-static const wchar_t kPageGlyphs[PageCount] = {0xE80F, 0xE790, 0xF0E2, 0xE71D, 0xE895, 0xE946};
+static const wchar_t* kPageNames[PageCount] = {L"General", L"Appearance", L"Layout", L"Search", L"Pins & apps", L"Updates", L"About"};
+static const wchar_t kPageGlyphs[PageCount] = {0xE80F, 0xE790, 0xF0E2, 0xE721, 0xE718, 0xE895, 0xE946};
+static std::vector<ThemeEntry> g_themeList;
 
 static float Dip(int px) { return px * 96.0f / g_dpi; }
 static int Px(float d) { return (int)std::lround(d * g_dpi / 96.0f); }
@@ -129,6 +135,62 @@ static Ctl PreviewButton() {
                    {{g_previewOn ? L"Hide preview" : L"Show preview", [] { SetPreview(!g_previewOn); }}}, g_previewOn ? -1 : 0);
 }
 
+static void PickFont() {
+    std::vector<std::wstring> fonts;
+    IDWriteFontCollection* sys = nullptr;
+    if (dw && SUCCEEDED(dw->GetSystemFontCollection(&sys, FALSE)) && sys) {
+        UINT32 n = sys->GetFontFamilyCount();
+        for (UINT32 i = 0; i < n; ++i) {
+            IDWriteFontFamily* fam = nullptr;
+            IDWriteLocalizedStrings* names = nullptr;
+            if (SUCCEEDED(sys->GetFontFamily(i, &fam)) && fam && SUCCEEDED(fam->GetFamilyNames(&names)) && names) {
+                UINT32 idx = 0; BOOL exists = FALSE;
+                names->FindLocaleName(L"en-us", &idx, &exists);
+                if (!exists) idx = 0;
+                UINT32 len = 0;
+                names->GetStringLength(idx, &len);
+                std::wstring name(len, L'\0');
+                names->GetString(idx, name.data(), len + 1);
+                if (!name.empty() && name[0] != L'@' && name.find(L"Icons") == std::wstring::npos && name.find(L"Assets") == std::wstring::npos &&
+                    name.find(L"Symbol") == std::wstring::npos && name.find(L"Emoji") == std::wstring::npos && name.find(L"Webdings") == std::wstring::npos &&
+                    name.find(L"Wingdings") == std::wstring::npos && name.find(L"Marlett") == std::wstring::npos) fonts.push_back(name);
+            }
+            if (names) names->Release();
+            if (fam) fam->Release();
+        }
+        sys->Release();
+    }
+    std::sort(fonts.begin(), fonts.end(), [](const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    static const wchar_t* favorites[] = {L"Segoe UI Variable Text", L"Segoe UI", L"Inter", L"Bahnschrift", L"Roboto", L"Open Sans", L"Calibri",
+                                         L"Aptos", L"Verdana", L"Cascadia Code", L"Consolas"};
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING | (g_config.font.empty() ? MF_CHECKED : 0), 1, L"Windows default");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    std::vector<std::wstring> order;
+    for (auto f : favorites)
+        if (std::find(fonts.begin(), fonts.end(), f) != fonts.end()) {
+            order.push_back(f);
+            AppendMenuW(m, MF_STRING | (g_config.font == f ? MF_CHECKED : 0), 100 + (UINT)order.size() - 1, f);
+        }
+    HMENU all = CreatePopupMenu();
+    size_t favCount = order.size();
+    for (size_t i = 0; i < fonts.size(); ++i) {
+        order.push_back(fonts[i]);
+        UINT flags = MF_STRING | (g_config.font == fonts[i] ? MF_CHECKED : 0) | ((i > 0 && i % 30 == 0) ? MF_MENUBARBREAK : 0);
+        AppendMenuW(all, flags, 100 + (UINT)order.size() - 1, fonts[i].c_str());
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)all, L"All fonts");
+    POINT pt; GetCursorPos(&pt);
+    UINT cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, g_hwnd, nullptr);
+    DestroyMenu(m);
+    (void)favCount;
+    if (cmd == 1) g_config.font.clear();
+    else if (cmd >= 100 && cmd - 100 < order.size()) g_config.font = order[cmd - 100];
+    else return;
+    Changed();
+}
+
 static void BuildGeneral(std::vector<Ctl>& v) {
     v.push_back(Header(L"Open Foyer with"));
     v.push_back(Toggle(L"Windows key", L"Tap Win to open Foyer. Shortcuts like Win+E, Win+D and Win+R keep working.",
@@ -138,8 +200,21 @@ static void BuildGeneral(std::vector<Ctl>& v) {
     v.push_back(Toggle(L"Pause Foyer", L"Hands the Windows key and Start button back to Windows until you turn this off.",
                        [] { return g_paused.load(); }, [](bool b) { g_paused = b; TrayUpdateTip(); Changed(false); }));
     v.push_back(Header(L"Startup"));
-    v.push_back(Toggle(L"Start with Windows", L"Foyer starts quietly in the tray when you sign in.",
-                       [] { return StartWithWindowsEnabled(); }, [](bool b) { SetStartWithWindows(b); Changed(false); }));
+    Ctl sw = Toggle(L"Start with Windows", g_config.elevatedMode ? L"Handled by \"Work over admin windows\" below." : L"Foyer starts quietly in the tray when you sign in.",
+                    [] { return g_config.elevatedMode || StartWithWindowsEnabled(); }, [](bool b) { SetStartWithWindows(b); Changed(false); });
+    sw.enabled = !g_config.elevatedMode;
+    v.push_back(sw);
+    v.push_back(Toggle(L"Work over admin windows",
+                       L"Windows blocks normal apps from admin windows, so the Windows Start menu opens there instead. This starts Foyer as administrator "
+                       L"at sign-in so it works everywhere (asks for permission once). Apps you open from Foyer still run normally, not as administrator.",
+                       [] { return g_config.elevatedMode && ProcessIsElevated(); },
+                       [](bool b) {
+                           if (b) {
+                               if (AdminModeEnable(g_hwnd)) DestroyWindow(g_hwnd);
+                           } else if (AdminModeDisable(g_hwnd)) {
+                               if (!ProcessIsElevated()) Changed(false);
+                           }
+                       }));
     v.push_back(Header(L"Personal touch"));
     v.push_back(Toggle(L"Greeting", L"\"Good evening\" with your name and today's date at the top of the menu.",
                        [] { return g_config.showGreeting; }, [](bool b) { g_config.showGreeting = b; Changed(); }));
@@ -151,7 +226,42 @@ static void BuildGeneral(std::vector<Ctl>& v) {
 static void BuildAppearance(std::vector<Ctl>& v) {
     v.push_back(PreviewButton());
     v.push_back(Header(L"Theme"));
+    g_themeList = ThemeList();
     v.push_back(Ctl{CType::ThemeGrid});
+    bool userTheme = g_config.theme.compare(0, 5, L"file:") == 0;
+    std::vector<std::pair<std::wstring, std::function<void()>>> themeButtons = {
+        {L"Import\x2026", [] {
+             wchar_t path[MAX_PATH] = L"";
+             OPENFILENAMEW ofn{sizeof(ofn)};
+             ofn.hwndOwner = g_hwnd;
+             ofn.lpstrFilter = L"Foyer theme (*.json)\0*.json\0";
+             ofn.lpstrFile = path; ofn.nMaxFile = MAX_PATH;
+             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+             if (!GetOpenFileNameW(&ofn)) return;
+             std::wstring id, err;
+             if (ThemeImport(path, &id, &err)) { g_config.theme = id; Changed(); }
+             else MessageBoxW(g_hwnd, err.c_str(), L"Foyer", MB_ICONWARNING);
+         }},
+        {L"Export current\x2026", [] {
+             std::wstring name = L"My theme";
+             if (!InputBox(g_hwnd, L"Export theme", L"Theme name:", name, g_theme.dark) || name.empty()) return;
+             wchar_t path[MAX_PATH];
+             wcsncpy_s(path, (name + L".json").c_str(), _TRUNCATE);
+             OPENFILENAMEW ofn{sizeof(ofn)};
+             ofn.hwndOwner = g_hwnd;
+             ofn.lpstrFilter = L"Foyer theme (*.json)\0*.json\0";
+             ofn.lpstrFile = path; ofn.nMaxFile = MAX_PATH; ofn.lpstrDefExt = L"json";
+             ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+             if (!GetSaveFileNameW(&ofn)) return;
+             if (!ThemeExport(g_config, path, name)) MessageBoxW(g_hwnd, L"Couldn't save the theme.", L"Foyer", MB_ICONWARNING);
+         }}};
+    if (userTheme) themeButtons.push_back({L"Delete this theme", [] {
+        if (MessageBoxW(g_hwnd, L"Delete this theme file?", L"Foyer", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+        ThemeDelete(g_config.theme);
+        g_config.theme = L"dark";
+        Changed();
+    }});
+    v.push_back(Buttons(L"Theme files", L"Share themes as small JSON files. Imported themes appear above.", themeButtons));
     v.push_back(Header(L"Color"));
     Ctl sw{CType::Swatches};
     sw.label = L"Accent color";
@@ -185,8 +295,19 @@ static void BuildAppearance(std::vector<Ctl>& v) {
     rad.setf = [](float f) { g_config.cornerRadius = std::round(f); Changed(false); };
     rad.fmt = [](float f) { return std::to_wstring((int)std::lround(f)) + L" px"; };
     v.push_back(rad);
+    v.push_back(Header(L"Text"));
+    std::wstring fontName = g_config.font.empty() ? L"Windows default" : g_config.font;
+    v.push_back(Buttons(L"Font", (L"Currently: " + fontName).c_str(), {{L"Choose font\x2026", [] { PickFont(); }}}));
+    Ctl ts{CType::Slider};
+    ts.label = L"Text size";
+    ts.desc = L"On top of your Windows text size setting.";
+    ts.fmin = 0.85f; ts.fmax = 1.3f;
+    ts.getf = [] { return g_config.fontScale; };
+    ts.setf = [](float f) { g_config.fontScale = std::round(f * 20) / 20; Changed(false); };
+    ts.fmt = [](float f) { return std::to_wstring((int)std::lround(f * 100)) + L"%"; };
+    v.push_back(ts);
     v.push_back(Header(L"Motion"));
-    v.push_back(Choice(L"Animations", L"Smooth adds a slide-in, staggered tiles and gliding hover. None is the fastest.",
+    v.push_back(Choice(L"Animations", L"Smooth adds a slide-in, staggered tiles and gliding hover. None is the fastest. Turning off animation effects in Windows also turns these off.",
                        {L"None", L"Fast", L"Smooth"},
                        [] { return IndexOf(g_config.animation, {L"none", L"fast", L"smooth"}); },
                        [](int i) { const wchar_t* o[] = {L"none", L"fast", L"smooth"}; g_config.animation = o[i]; Changed(); }));
@@ -206,22 +327,118 @@ static void BuildLayout(std::vector<Ctl>& v) {
     v.push_back(Choice(L"Icon size", nullptr, {L"Small", L"Medium", L"Large"},
                        [] { return IndexOf(g_config.iconSize, {L"small", L"medium", L"large"}); },
                        [](int i) { const wchar_t* o[] = {L"small", L"medium", L"large"}; g_config.iconSize = o[i]; Changed(); }));
+    v.push_back(Header(L"Bottom bar shortcuts"));
+    Ctl chips{CType::ChipGrid};
+    chips.desc = L"Pick up to 6. They appear next to the power button, in this order.";
+    v.push_back(chips);
+}
+
+static void BuildSearch(std::vector<Ctl>& v) {
+    v.push_back(Header(L"What search looks through"));
+    v.push_back(Toggle(L"Files and folders", L"Shows matching files from your Desktop, Documents, Downloads, Pictures, Music, Videos and OneDrive.",
+                       [] { return g_config.searchFiles; }, [](bool b) { g_config.searchFiles = b; Changed(); }));
+    v.push_back(Toggle(L"Settings and Control Panel", L"Jump straight to pages like Bluetooth, Display or Device Manager.",
+                       [] { return g_config.searchSettings; }, [](bool b) { g_config.searchSettings = b; Changed(); }));
+    v.push_back(Info(L"Apps, the calculator and unit conversions are always on. Search never goes to the web."));
+    v.push_back(Header(L"File search engine"));
+    std::wstring engine = search::EverythingRunning()
+        ? std::wstring(L"Using Everything (voidtools), so every drive is searched instantly.")
+        : (search::FilesIndexed() ? L"Using Foyer's own index: " + std::to_wstring(search::FilesIndexed()) + L" files and folders in your personal folders. "
+                                    L"It refreshes at low priority and pauses while you game."
+                                  : std::wstring(L"Foyer's own index is building in the background (it starts about a minute after Foyer)."));
+    engine += L"\n\nTip: install Everything from voidtools.com and Foyer will use it automatically.";
+    v.push_back(Info(engine));
+    v.push_back(Header(L"Shortcuts"));
+    v.push_back(Info(L"f: report      search files and folders only\n"
+                     L"s: bluetooth   search settings only\n"
+                     L"a: chrome      search apps only\n"
+                     L"> cmd          run a command (Ctrl+Shift+Enter runs it as administrator)\n"
+                     L"12*7.5   or   5 cy to cf   or   72 f in c      calculator and unit conversions (Enter copies the answer)"));
+    v.push_back(Info(L"Results you open often move up the list over time."));
+}
+
+static std::wstring PinRowLabel(const Pin& p) {
+    std::wstring name = PinDisplayName(p);
+    switch (p.type) {
+        case PinType::Group: return name + L"   \x00B7   folder, " + std::to_wstring(p.items.size()) + (p.items.size() == 1 ? L" item" : L" items");
+        case PinType::File: return name + L"   \x00B7   file";
+        case PinType::Folder: return name + L"   \x00B7   folder";
+        case PinType::Url: return name + L"   \x00B7   website";
+        default: return name;
+    }
 }
 
 static void BuildApps(std::vector<Ctl>& v) {
-    v.push_back(Header(L"Pinned apps"));
-    if (g_config.pins.empty()) v.push_back(Info(L"Nothing pinned yet. Right-click any app in Foyer and choose Pin to Foyer."));
+    v.push_back(Header(L"Pinned"));
+    v.push_back(Info(L"Drag tiles to reorder them. Drop one tile onto another to make a folder. Right-click a tile to rename it or give it a custom icon."));
+    if (g_config.pins.empty()) v.push_back(Info(L"Nothing pinned yet. Right-click any app in Foyer and choose Pin to Foyer, or drag it onto the Pinned area."));
     for (int i = 0; i < (int)g_config.pins.size(); ++i) {
         Ctl c{CType::PinRow};
-        c.label = g_config.pins[i].name.empty() ? g_config.pins[i].id : g_config.pins[i].name;
+        c.label = PinRowLabel(g_config.pins[i]);
         c.index = i;
         v.push_back(c);
     }
+    v.push_back(Buttons(L"Add", nullptr, {
+        {L"Website\x2026", [] {
+             std::wstring url = L"https://";
+             if (!InputBox(g_hwnd, L"Pin a website", L"Website address:", url, g_theme.dark) || url.size() < 9) return;
+             if (url.find(L"://") == std::wstring::npos) url = L"https://" + url;
+             Pin p; p.id = url; p.type = PinType::Url;
+             std::wstring name = PinDisplayName(p);
+             if (InputBox(g_hwnd, L"Pin a website", L"Name for the tile:", name, g_theme.dark) && !name.empty()) p.label = name;
+             g_config.pins.push_back(p);
+             Changed();
+         }},
+        {L"File\x2026", [] {
+             wchar_t path[MAX_PATH] = L"";
+             OPENFILENAMEW ofn{sizeof(ofn)};
+             ofn.hwndOwner = g_hwnd;
+             ofn.lpstrFilter = L"All files\0*.*\0";
+             ofn.lpstrFile = path; ofn.nMaxFile = MAX_PATH;
+             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+             if (!GetOpenFileNameW(&ofn)) return;
+             Pin p; p.id = path; p.type = PinType::File;
+             std::wstring lower = ToLower(p.id);
+             if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, L".exe") == 0) p.type = PinType::App;
+             g_config.pins.push_back(p);
+             Changed();
+         }},
+        {L"Folder\x2026", [] {
+             IFileOpenDialog* dlg = nullptr;
+             if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) return;
+             DWORD o = 0; dlg->GetOptions(&o); dlg->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+             if (SUCCEEDED(dlg->Show(g_hwnd))) {
+                 IShellItem* it = nullptr;
+                 if (SUCCEEDED(dlg->GetResult(&it)) && it) {
+                     PWSTR pth = nullptr;
+                     if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &pth)) && pth) {
+                         Pin p; p.id = pth; p.type = PinType::Folder;
+                         g_config.pins.push_back(p);
+                         CoTaskMemFree(pth);
+                         Changed();
+                     }
+                     it->Release();
+                 }
+             }
+             dlg->Release();
+         }},
+        {L"Empty folder", [] { Pin g; g.type = PinType::Group; g.label = L"Folder"; g_config.pins.push_back(g); Changed(); }},
+    }));
+    v.push_back(Toggle(L"My Apps folder", L"A folder at the start of Pinned with every larosa023 app on this PC, kept up to date automatically.",
+                       [] { return g_config.myAppsGroup; }, [](bool b) { g_config.myAppsGroup = b; Changed(); }));
     v.push_back(Buttons(nullptr, nullptr, {{L"Reset pins to defaults", [] {
-        if (MessageBoxW(g_hwnd, L"Replace your pinned apps with Foyer's defaults?", L"Foyer", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
+        if (MessageBoxW(g_hwnd, L"Replace your pinned items with Foyer's defaults?", L"Foyer", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
             ConfigDefaultPins(); Changed();
         }
     }}}));
+
+    v.push_back(Header(L"Recent"));
+    v.push_back(Toggle(L"Show recent files and folders", L"Only files and folders you opened, never \"recently added\" apps.",
+                       [] { return g_config.recentEnabled; }, [](bool b) { g_config.recentEnabled = b; Changed(); }));
+    if (!g_config.hiddenRecent.empty())
+        v.push_back(Buttons(L"Removed items", (std::to_wstring(g_config.hiddenRecent.size()) + L" item(s) removed from Recent.").c_str(),
+                            {{L"Bring them back", [] { g_config.hiddenRecent.clear(); Changed(); }}}));
+
     v.push_back(Header(L"Hidden apps"));
     if (g_config.hidden.empty()) v.push_back(Info(L"No hidden apps. Right-click an app in Foyer and choose Hide from Foyer to declutter."));
     for (int i = 0; i < (int)g_config.hidden.size(); ++i) {
@@ -286,6 +503,19 @@ static void BuildAbout(std::vector<Ctl>& v) {
     v.push_back(Buttons(L"Project", L"Source code, releases and issue tracker on GitHub.",
                         {{L"Open GitHub", [] { ShellOpen(L"https://github.com/larosa023/Foyer"); }},
                          {L"Release notes", [] { ShellOpen(L"https://github.com/larosa023/Foyer/releases"); }}}));
+    if (IsPortableCopy()) {
+        v.push_back(Info(L"Running in portable mode: settings are kept in a \"data\" folder next to Foyer.exe."));
+    } else if (IsInstalledCopy()) {
+        v.push_back(Buttons(L"Installed", (L"Foyer is installed in " + InstallDir() + L" and listed in Apps & features.").c_str(),
+                            {{L"Uninstall\x2026", [] { ShellExecuteW(nullptr, nullptr, ExePath().c_str(), L"--uninstall", nullptr, SW_SHOWNORMAL); }}}));
+    } else {
+        v.push_back(Buttons(L"Not installed", (L"Running from " + ExeDir() + L". Installing adds Foyer to the Start menu and Apps & features.").c_str(),
+                            {{L"Install Foyer", [] {
+                                  std::wstring err;
+                                  if (!InstallFoyer(g_hwnd, &err)) MessageBoxW(g_hwnd, err.c_str(), L"Foyer", MB_ICONWARNING);
+                                  else DestroyWindow(g_hwnd);
+                              }}}, 0));
+    }
     v.push_back(Header(L"Your data"));
     v.push_back(Buttons(L"Backup", L"Save all settings, pins, hidden apps and theme choices to one file.",
                         {{L"Back up\x2026", [] {
@@ -304,7 +534,7 @@ static void BuildAbout(std::vector<Ctl>& v) {
                          {L"Open log", [] { ShellOpen((DataDir() + L"\\foyer.log").c_str()); }}}));
     v.push_back(Header(L"Keyboard"));
     v.push_back(Info(L"Type to search  \x00B7  Arrows to move  \x00B7  Tab to switch columns  \x00B7  Enter to open\n"
-                     L"Ctrl+Shift+Enter run as admin  \x00B7  Menu key for options  \x00B7  Ctrl+, settings  \x00B7  Esc to clear or close\n"
+                     L"Ctrl+Shift+Enter run as admin  \x00B7  Menu key for options  \x00B7  F2 rename a tile  \x00B7  Ctrl+, settings  \x00B7  Esc to clear or close\n"
                      L"Ctrl+Win, Ctrl+Esc or Shift+click Start  \x2192  original Windows Start menu"));
 }
 
@@ -314,6 +544,7 @@ static void BuildPage() {
         case PageGeneral: BuildGeneral(g_ctls); break;
         case PageAppearance: BuildAppearance(g_ctls); break;
         case PageLayout: BuildLayout(g_ctls); break;
+        case PageSearch: BuildSearch(g_ctls); break;
         case PageApps: BuildApps(g_ctls); break;
         case PageUpdates: BuildUpdates(g_ctls); break;
         case PageAbout: BuildAbout(g_ctls); break;
@@ -418,7 +649,8 @@ static float DrawButton(float right, float cy, const std::wstring& text, bool pr
 static float CardHeight(const Ctl& c, float width) {
     switch (c.type) {
         case CType::Header: return 40;
-        case CType::ThemeGrid: { int perRow = std::max(1, (int)((width + 12) / 124)); int rows = (kThemePresetCount + perRow - 1) / perRow; return rows * 112.0f; }
+        case CType::ThemeGrid: { int perRow = std::max(1, (int)((width + 12) / 124)); int rows = ((int)g_themeList.size() + perRow - 1) / perRow; return rows * 112.0f; }
+        case CType::ChipGrid: { int perRow = std::max(1, (int)((width - 24) / 168)); int rows = (kQuickShortcutCount + perRow - 1) / perRow; return 48 + rows * 42.0f + 10; }
         case CType::LayoutGrid: return 150;
         case CType::PinRow: case CType::HiddenRow: return 52;
         case CType::Info: return std::max(52.0f, MeasureHeight(c.desc, g_fDesc, width - 40) + 32);
@@ -433,22 +665,22 @@ static float CardHeight(const Ctl& c, float width) {
 }
 
 static void DrawThemeCard(float x, float y, float w, float h, int idx, int ctl) {
-    const ThemePreset& p = kThemePresets[idx];
-    Theme t = BuildThemeNamed(g_config, p.id);
+    const ThemeEntry& p = g_themeList[idx];
+    Theme t = BuildThemeNamed(g_config, p.id.c_str());
     bool sel = g_config.theme == p.id;
     bool hot = Hot(ctl, idx);
     D2D1_RECT_F card = D2D1::RectF(x, y, x + w, y + h - 26);
     float lift = hot ? -2.0f : 0.0f;
     card.top += lift; card.bottom += lift;
     g_cv.FillRound(card, 10, t.bg);
-    if (std::wstring(p.id) == L"system") {
+    if (p.id == L"system") {
         // Split preview: half light, half dark
         Theme lt = BuildThemeNamed(g_config, L"light");
         g_rt->PushAxisAlignedClip(D2D1::RectF(card.left, card.top, (card.left + card.right) / 2, card.bottom), D2D1_ANTIALIAS_MODE_ALIASED);
         g_cv.FillRound(card, 10, lt.bg);
         g_rt->PopAxisAlignedClip();
     }
-    if (std::wstring(p.id) == L"glass") g_cv.FillRound(card, 10, Alpha(D2D1::ColorF(0.6f, 0.75f, 1.0f, 1.0f), 0.18f));
+    if (p.id == L"glass") g_cv.FillRound(card, 10, Alpha(D2D1::ColorF(0.6f, 0.75f, 1.0f, 1.0f), 0.18f));
     // mini menu: glow, search pill, tiles
     g_cv.Circle(card.left + 18, card.top + 14, 22, Alpha(t.accent, 0.22f));
     g_cv.FillRound(D2D1::RectF(card.left + 10, card.top + 10, card.right - 10, card.top + 20), 5, t.surface);
@@ -462,7 +694,7 @@ static void DrawThemeCard(float x, float y, float w, float h, int idx, int ctl) 
         g_cv.Circle(card.right - 10, card.top + 10, 8, g_theme.accent);
         g_cv.Glyph(0xE73E, g_fSmallC, D2D1::RectF(card.right - 18, card.top + 2, card.right - 2, card.top + 18), g_theme.onAccent);
     }
-    g_cv.Text(p.name, g_fSmallC, D2D1::RectF(x, card.bottom + 4, x + w, y + h), sel ? g_theme.text : g_theme.subtext);
+    g_cv.Text(p.name.c_str(), g_fSmallC, D2D1::RectF(x, card.bottom + 4, x + w, y + h), sel ? g_theme.text : g_theme.subtext);
     AddZone(ctl, idx, D2D1::RectF(x, y, x + w, y + h));
 }
 
@@ -629,7 +861,7 @@ static void Paint() {
                 float knob = tr.left + 11 + k * (tr.right - tr.left - 22);
                 g_cv.Circle(knob, midY, hot ? 7.5f : 6.5f, Mix(t.subtext, t.onAccent, k));
                 g_cv.Text(on ? L"On" : L"Off", g_fDesc, D2D1::RectF(tr.left - 44, midY - 10, tr.left - 10, midY + 10), t.subtext);
-                AddZone(i, 0, D2D1::RectF(tr.left - 50, card.top, cx1, card.bottom));
+                if (c.enabled) AddZone(i, 0, D2D1::RectF(tr.left - 50, card.top, cx1, card.bottom));
                 break;
             }
             case CType::Choice: {
@@ -706,7 +938,7 @@ static void Paint() {
                 break;
             case CType::ThemeGrid: {
                 int perRow = std::max(1, (int)((width + 12) / 124));
-                for (int p = 0; p < kThemePresetCount; ++p)
+                for (int p = 0; p < (int)g_themeList.size(); ++p)
                     DrawThemeCard(cx0 + (p % perRow) * 124, card.top + (p / perRow) * 112, 112, 104, p, i);
                 break;
             }
@@ -737,6 +969,27 @@ static void Paint() {
             case CType::UpdateCard:
                 DrawUpdateCard(card, i);
                 break;
+            case CType::ChipGrid: {
+                g_cv.Text(c.desc, g_fDesc, D2D1::RectF(card.left + 20, card.top + 12, card.right - 20, card.top + 36), t.subtext);
+                int perRow = std::max(1, (int)((width - 24) / 168));
+                float cw = (width - 24 - (perRow - 1) * 8) / perRow;
+                for (int k = 0; k < kQuickShortcutCount; ++k) {
+                    const QuickShortcut& q = kQuickShortcuts[k];
+                    auto pos = std::find(g_config.shortcuts.begin(), g_config.shortcuts.end(), q.id);
+                    bool on = pos != g_config.shortcuts.end();
+                    float x = card.left + 12 + (k % perRow) * (cw + 8), yy = card.top + 44 + (k / perRow) * 42;
+                    D2D1_RECT_F r = D2D1::RectF(x, yy, x + cw, yy + 34);
+                    bool hot = Hot(i, k);
+                    g_cv.FillRound(r, 17, on ? Alpha(t.accent, hot ? 0.32f : 0.22f) : (hot ? t.hover : Alpha(t.surfaceStrong, 0.7f)));
+                    if (on) g_cv.StrokeRound(r, 17, Alpha(t.accent, 0.9f), 1.25f);
+                    g_cv.Glyph(q.glyph, g_fIcon, D2D1::RectF(r.left + 8, r.top, r.left + 36, r.bottom), on ? t.accent : t.subtext);
+                    std::wstring label = q.name;
+                    if (on) label = std::to_wstring((pos - g_config.shortcuts.begin()) + 1) + L". " + label;
+                    g_cv.Text(label, g_fLabel, D2D1::RectF(r.left + 40, r.top, r.right - 10, r.bottom), on ? t.text : t.subtext);
+                    AddZone(i, k, r);
+                }
+                break;
+            }
             case CType::Hero: {
                 D2D1_RECT_F big = D2D1::RectF(cx0, card.top + 10, cx0 + 92, card.top + 102);
                 g_cv.Circle(cx0 + 46, card.top + 56, 70, Alpha(t.accent, 0.12f));
@@ -815,7 +1068,16 @@ static void Click(int ci, int part, float x) {
             break;
         }
         case CType::Buttons: if (part < (int)c.buttons.size() && c.buttons[part].second) c.buttons[part].second(); break;
-        case CType::ThemeGrid: g_config.theme = kThemePresets[part].id; Changed(); break;
+        case CType::ThemeGrid: if (part < (int)g_themeList.size()) { g_config.theme = g_themeList[part].id; Changed(); } break;
+        case CType::ChipGrid: {
+            std::wstring id = kQuickShortcuts[part].id;
+            auto it = std::find(g_config.shortcuts.begin(), g_config.shortcuts.end(), id);
+            if (it != g_config.shortcuts.end()) g_config.shortcuts.erase(it);
+            else if ((int)g_config.shortcuts.size() < kMaxQuickShortcuts) g_config.shortcuts.push_back(id);
+            else { MessageBoxW(g_hwnd, L"The bottom bar has room for 6 shortcuts. Turn one off first.", L"Foyer", MB_ICONINFORMATION); break; }
+            Changed();
+            break;
+        }
         case CType::LayoutGrid: { const wchar_t* ids[] = {L"modern", L"classic", L"fullscreen"}; g_config.layout = ids[part]; Changed(); break; }
         case CType::PinRow: {
             int i = c.index;

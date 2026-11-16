@@ -3,10 +3,13 @@
 A fast, clean, fully customizable replacement for the Windows 11 Start menu.
 Part of the larosa023 suite of lightweight Windows apps.
 
-**Status: v0.2.0** — Win key + Start button interception with fallbacks, search, pinned apps,
+**Status: v0.3.0** — Win key + Start button interception with fallbacks, search, pinned apps,
 full All apps list, account and power menus, a full settings window, themes (Dark, Light,
 Midnight, Glass, Ember, Ocean, Follow Windows) with acrylic/Mica, three layouts (Modern,
 Classic, Full screen), animations, and a built-in updater with automatic rollback.
+Search covers apps, files (Everything or a built-in index), Settings and Control Panel,
+with a calculator, unit conversions and `f:` `s:` `a:` `>` prefixes. Pins support folders,
+drag and drop, files, folders, websites, custom names and icons, and a My Apps folder.
 
 ---
 
@@ -38,7 +41,9 @@ code-signed yet: **More info → Run anyway**.
 
 ## Using Foyer
 
-- **Type** to search apps (prefix, word-start, initials like `vsc`, and substring matches)
+- **Type** to search apps, settings, Control Panel and files (prefix, word-start, initials like `vsc`)
+- `f:` files, `s:` settings, `a:` apps, `>` run a command; math (`12*7.5`) and units (`5 cy to cf`) work too
+- **Drag** to reorder pins; drop a tile on another to make a folder; **F2** renames a tile
 - **↑ ↓ ← →** move, **Tab** switches between Pinned and All apps, **PgUp/PgDn** page
 - **Enter** launches, **Ctrl+Shift+Enter** runs as administrator
 - **Esc** clears the search, then closes
@@ -118,8 +123,9 @@ is written outside Foyer's own data folder and (if you enable it) the HKCU Run k
 - Windows itself unhooks a low-level hook that keeps timing out — which again just restores
   the normal Start menu.
 - Windows blocks normal apps from sending keystrokes to admin windows. When an elevated
-  window is focused Foyer doesn't intercept, so Windows' Start menu opens. (Phase 5 can
-  remove this limitation by running Foyer with UI access from Program Files.)
+  window is focused Foyer doesn't intercept, so Windows' Start menu opens. Turn on
+  **Settings → General → Work over admin windows** to start Foyer as administrator at sign-in
+  (through a scheduled task) so it works everywhere; apps it launches still run as you.
 
 ## Project structure
 
@@ -131,6 +137,12 @@ Foyer/
 │  ├─ startbutton.cpp   finds Start button(s) on all taskbars via UI Automation
 │  ├─ menu.cpp          the menu window: layouts, drawing, animation, keyboard/mouse, actions
 │  ├─ settings.cpp      the settings window (custom-drawn, Mica, live apply + live preview)
+│  ├─ search.cpp/.h     search providers: settings catalog, file index + Everything IPC, frecency, run
+│  ├─ calc.cpp/.h       calculator and unit conversions (no Windows code; unit-tested)
+│  ├─ recent.cpp/.h     recent files and folders
+│  ├─ system.cpp/.h     installer, admin mode (unelevated launching), accessibility (MSAA)
+│  ├─ inputbox.cpp/.h   small text prompt (rename, add website)
+│  ├─ shortcuts.h       bottom bar shortcut catalog
 │  ├─ gfx.cpp/.h        shared Direct2D/DirectWrite helpers and theme presets
 │  ├─ updater.cpp/.h    reusable GitHub Releases updater (verify, swap, relaunch, rollback)
 │  ├─ autoupdate.cpp    Foyer's update policy (schedule, notifications, quiet-time deferral)
@@ -171,10 +183,10 @@ Output: `dist/Foyer.exe`
 ## Roadmap
 
 - [x] **Phase 1** — interception + fallbacks, search bar, pinned, all apps, power/account menus, tray
-- [ ] **Phase 2** — search: files (own index or Everything), folders, Settings pages, Control Panel,
-      calculator, unit conversions, prefix filters (`f:` `s:` `>`), ranking by launch count; Recent
+- [x] **Phase 2** — search (files, settings, calculator, units, prefixes, ranking) and Recent
 - [x] **Phase 3 (most)** — themes, Mica/acrylic, layout modes, settings window with live preview
-- [ ] Phase 3 remainder — drag-to-reorder pins, pin folders, custom fonts, theme JSON import/export
+- [x] Phase 3 remainder — drag-to-reorder pins, pin folders, custom fonts, theme JSON import/export
 - [x] **Phase 4 (most)** — reusable updater with hash check, rollback and Stable/Beta; backup/restore
-- [ ] Phase 4 remainder — installer
-- [ ] **Phase 5** — (animations done) accessibility, performance tuning, "My Apps" auto-detection, UI-access build
+- [x] Phase 4 remainder — installer (self-install + uninstall)
+- [x] **Phase 5 (most)** — animations, accessibility, icon cache, My Apps, admin-window support
+- [ ] Next — performance profiling on real hardware, more search providers

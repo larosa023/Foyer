@@ -5,9 +5,12 @@
 //   Foyer.exe --quit     close a running Foyer
 //   Foyer.exe --original open the real Windows Start menu
 //   Foyer.exe --settings open Foyer's settings window
-//   (--updated <pid> / --rolled-back <version> are used by the built-in updater)
+//   Foyer.exe --uninstall remove Foyer (used by Apps & features)
+//   (--updated, --rolled-back, --wait-pid, --installed, --enable-admin-mode are internal)
 #include "common.h"
 #include "config.h"
+#include "system.h"
+#include "search.h"
 #include <shellapi.h>
 #include <objbase.h>
 
@@ -33,6 +36,8 @@ static bool HasArg(const wchar_t* cmdLine, const wchar_t* arg) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     SetUnhandledExceptionFilter(CrashHandler);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    if (HandleStartupSwitches(cmdLine)) return 0;   // --uninstall, --wait-pid, --enable-admin-mode
 
     g_mutex = CreateMutexW(nullptr, TRUE, L"Local\\Foyer.larosa023.SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -60,6 +65,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     Log(L"==== Foyer %ls starting (data: %ls)", FOYER_VERSION, DataDir().c_str());
     bool firstRun = GetFileAttributesW(ConfigPath().c_str()) == INVALID_FILE_ATTRIBUTES;
     ConfigLoad();
+    ApplyStartupSwitches(cmdLine);
+    search::UsageLoad();
     g_interceptStartButton = g_config.interceptStartButton;
     g_interceptWinKey = g_config.interceptWinKey;
 
@@ -73,6 +80,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     StartButtonRefreshAsync(hwnd);
     if (!HookStart(hwnd)) Log(L"Failed to start hook thread");
     if (HasArg(cmdLine, L"--settings")) SettingsOpen(-1);
+    search::FilesInit(hwnd, WM_FOYER_FILES_READY);
+    if (!HasArg(cmdLine, L"--updated") && !HasArg(cmdLine, L"--installed")) PostMessageW(hwnd, WM_FOYER_OFFER_INSTALL, 0, 0);
     if (firstRun) TrayBalloon(L"Foyer is ready", L"Press the Windows key to open Foyer. Ctrl+Win still opens the original Start menu.");
 
     MSG msg;

@@ -2,7 +2,11 @@
 #include "gfx.h"
 #include "config.h"
 #include <dwmapi.h>
+#include <shlobj.h>
 #include <algorithm>
+#include "json.h"
+#include "system.h"
+#include <map>
 
 namespace gfx {
 
@@ -119,8 +123,166 @@ static D2D1_COLOR_F TuneAccent(D2D1_COLOR_F a, bool dark) {
     return a;
 }
 
+// ---------------------------------------------------------------- theme files
+struct ThemeFile {
+    std::wstring name, base = L"dark", backdrop, font;
+    uint32_t accent = 0; bool hasAccent = false;
+    float opacity = -1, radius = -1; int glow = -1;
+    std::map<std::wstring, uint32_t> colors;
+};
+
+static bool ParseHex(const std::wstring& s, uint32_t& out) {
+    std::wstring t = s;
+    if (!t.empty() && t[0] == L'#') t = t.substr(1);
+    if (t.size() != 6) return false;
+    wchar_t* end = nullptr;
+    unsigned long v = wcstoul(t.c_str(), &end, 16);
+    if (!end || *end) return false;
+    out = (uint32_t)v;
+    return true;
+}
+
+static bool ReadUtf8(const std::wstring& path, std::wstring& out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD size = GetFileSize(h, nullptr), read = 0;
+    std::string buf(size < 1024 * 1024 ? size : 0, '\0');
+    bool ok = !buf.empty() && ReadFile(h, &buf[0], size, &read, nullptr);
+    CloseHandle(h);
+    if (!ok) return false;
+    size_t skip = (read >= 3 && (unsigned char)buf[0] == 0xEF) ? 3 : 0;
+    int n = MultiByteToWideChar(CP_UTF8, 0, buf.data() + skip, (int)(read - skip), nullptr, 0);
+    out.assign(n, L'\0');
+    if (n) MultiByteToWideChar(CP_UTF8, 0, buf.data() + skip, (int)(read - skip), &out[0], n);
+    return true;
+}
+
+static bool ParseThemeFile(const std::wstring& text, ThemeFile& tf) {
+    json::Value root;
+    json::Parser p(text);
+    if (!p.Parse(root) || root.type != json::Value::Object) return false;
+    tf.name = root.GetStr(L"name");
+    tf.base = root.GetStr(L"base", L"dark");
+    if (tf.base != L"light" && tf.base != L"midnight" && tf.base != L"ember" && tf.base != L"ocean" && tf.base != L"glass") tf.base = L"dark";
+    tf.backdrop = root.GetStr(L"backdrop");
+    tf.font = root.GetStr(L"font");
+    tf.hasAccent = ParseHex(root.GetStr(L"accent"), tf.accent);
+    tf.opacity = (float)root.GetNum(L"opacity", -1);
+    tf.radius = (float)root.GetNum(L"radius", -1);
+    if (const json::Value* g = root.Get(L"glow"); g && g->type == json::Value::Bool) tf.glow = g->b ? 1 : 0;
+    if (const json::Value* cols = root.Get(L"colors"); cols && cols->type == json::Value::Object)
+        for (auto& kv : cols->obj) { uint32_t v; if (kv.second.type == json::Value::String && ParseHex(kv.second.s, v)) tf.colors[kv.first] = v; }
+    return true;
+}
+
+static std::wstring ThemeFilePath(const std::wstring& name) { return ThemesDir() + L"\\" + name + L".json"; }
+
+static bool LoadThemeFile(const std::wstring& name, ThemeFile& tf) {
+    std::wstring text;
+    return ReadUtf8(ThemeFilePath(name), text) && ParseThemeFile(text, tf);
+}
+
+std::vector<ThemeEntry> ThemeList() {
+    std::vector<ThemeEntry> out;
+    for (int i = 0; i < kThemePresetCount; ++i) out.push_back({kThemePresets[i].id, kThemePresets[i].name});
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW((ThemesDir() + L"\\*.json").c_str(), &fd);
+    if (f != INVALID_HANDLE_VALUE) {
+        do {
+            std::wstring file = fd.cFileName;
+            std::wstring stem = file.substr(0, file.size() - 5);
+            ThemeFile tf;
+            if (!LoadThemeFile(stem, tf)) continue;
+            out.push_back({L"file:" + stem, tf.name.empty() ? stem : tf.name});
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+    return out;
+}
+
+static std::wstring Hex(uint32_t c) { wchar_t b[16]; swprintf(b, 16, L"#%06X", c & 0xFFFFFF); return b; }
+
+static bool WriteUtf8(const std::wstring& path, const std::wstring& text) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0, nullptr, nullptr);
+    std::string buf(n, '\0');
+    if (n) WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), &buf[0], n, nullptr, nullptr);
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD w = 0;
+    bool ok = WriteFile(h, buf.data(), (DWORD)buf.size(), &w, nullptr) && w == buf.size();
+    CloseHandle(h);
+    return ok;
+}
+
+static uint32_t ToRgb(D2D1_COLOR_F c) {
+    auto b = [](float v) { return (uint32_t)std::lround(std::clamp(v, 0.0f, 1.0f) * 255); };
+    return (b(c.r) << 16) | (b(c.g) << 8) | b(c.b);
+}
+
+bool ThemeExport(const Config& c, const std::wstring& path, const std::wstring& name) {
+    Theme t = BuildThemeNamed(c, c.theme.c_str());
+    std::wstring base = c.theme;
+    if (base.compare(0, 5, L"file:") == 0) { ThemeFile tf; base = LoadThemeFile(base.substr(5), tf) ? tf.base : L"dark"; }
+    if (base == L"system") base = WindowsUsesLightTheme() ? L"light" : L"dark";
+    json::Value root = json::Value::MakeObject();
+    root.Set(L"name", json::Value::Str(name));
+    root.Set(L"base", json::Value::Str(base));
+    root.Set(L"accent", json::Value::Str(Hex(ToRgb(t.accent))));
+    root.Set(L"backdrop", json::Value::Str(c.backdrop));
+    root.Set(L"opacity", json::Value::Num(std::round(c.opacity * 100) / 100));
+    root.Set(L"radius", json::Value::Num(std::round(c.cornerRadius)));
+    root.Set(L"glow", json::Value::Boolean(c.accentGlow));
+    if (!c.font.empty()) root.Set(L"font", json::Value::Str(c.font));
+    json::Value cols = json::Value::MakeObject();
+    cols.Set(L"background", json::Value::Str(Hex(ToRgb(t.bg))));
+    cols.Set(L"bottom", json::Value::Str(Hex(ToRgb(t.bottomBg))));
+    cols.Set(L"surface", json::Value::Str(Hex(ToRgb(t.surface))));
+    cols.Set(L"text", json::Value::Str(Hex(ToRgb(t.text))));
+    cols.Set(L"subtext", json::Value::Str(Hex(ToRgb(t.subtext))));
+    root.Set(L"colors", cols);
+    std::wstring text;
+    json::Write(root, text);
+    return WriteUtf8(path, text + L"\n");
+}
+
+bool ThemeImport(const std::wstring& path, std::wstring* newId, std::wstring* error) {
+    std::wstring text;
+    ThemeFile tf;
+    if (!ReadUtf8(path, text) || !ParseThemeFile(text, tf)) { if (error) *error = L"That file isn't a Foyer theme."; return false; }
+    std::wstring stem = path.substr(path.find_last_of(L"\\/") + 1);
+    if (stem.size() > 5 && _wcsicmp(stem.c_str() + stem.size() - 5, L".json") == 0) stem.resize(stem.size() - 5);
+    if (!tf.name.empty()) stem = tf.name;
+    std::wstring clean;
+    for (wchar_t ch : stem) clean += (wcschr(L"\\/:*?\"<>|", ch) ? L'-' : ch);
+    if (clean.empty()) clean = L"Theme";
+    SHCreateDirectoryExW(nullptr, ThemesDir().c_str(), nullptr);
+    if (!WriteUtf8(ThemeFilePath(clean), text)) { if (error) *error = L"Couldn't save the theme."; return false; }
+    if (newId) *newId = L"file:" + clean;
+    return true;
+}
+
+bool ThemeDelete(const std::wstring& id) {
+    if (id.compare(0, 5, L"file:") != 0) return false;
+    return DeleteFileW(ThemeFilePath(id.substr(5)).c_str()) != FALSE;
+}
+
+const wchar_t* MenuFont(const Config& c) {
+    static std::wstring font;
+    font = c.font;
+    if (c.theme.compare(0, 5, L"file:") == 0) { ThemeFile tf; if (LoadThemeFile(c.theme.substr(5), tf) && !tf.font.empty() && c.font.empty()) font = tf.font; }
+    if (font.empty()) return UiFont();
+    // fall back if the font isn't installed
+    IDWriteFontCollection* sys = nullptr;
+    bool ok = false;
+    if (dw && SUCCEEDED(dw->GetSystemFontCollection(&sys, FALSE)) && sys) { ok = FontExists(sys, font.c_str()); sys->Release(); }
+    return ok ? font.c_str() : UiFont();
+}
+
 Theme BuildThemeNamed(const Config& c, const wchar_t* themeId) {
     std::wstring id = themeId;
+    ThemeFile tf;
+    bool fromFile = id.compare(0, 5, L"file:") == 0 && LoadThemeFile(id.substr(5), tf);
+    if (id.compare(0, 5, L"file:") == 0) id = fromFile ? tf.base : L"dark";
     if (id == L"system") id = WindowsUsesLightTheme() ? L"light" : L"dark";
     Theme t;
     uint32_t presetAccent = 0;
@@ -160,6 +322,22 @@ Theme BuildThemeNamed(const Config& c, const wchar_t* themeId) {
     float opacity = c.opacity;
     if (id == L"glass") { backdrop = L"acrylic"; opacity = std::min(opacity, 0.5f); }
     if (id == L"midnight" && backdrop != L"solid") opacity = std::max(opacity, 0.85f);
+    if (fromFile) {
+        if (!tf.backdrop.empty()) backdrop = tf.backdrop;
+        if (tf.opacity >= 0.3f && tf.opacity <= 1.0f) opacity = tf.opacity;
+        if (tf.radius >= 0 && tf.radius <= 24) t.radius = tf.radius;
+        if (tf.glow >= 0) t.glow = tf.glow == 1;
+        auto col = [&](const wchar_t* k, D2D1_COLOR_F& dst) { auto it = tf.colors.find(k); if (it != tf.colors.end()) dst = Rgb(it->second); };
+        col(L"background", t.bg); col(L"bottom", t.bottomBg); col(L"surface", t.surface);
+        col(L"text", t.text); col(L"subtext", t.subtext);
+        if (tf.colors.count(L"surface")) t.surfaceStrong = Mix(t.surface, t.text, 0.08f);
+        if (c.useWindowsAccent && tf.hasAccent) t.accent = TuneAccent(Rgb(tf.accent), t.dark);
+        if (tf.colors.count(L"accent")) t.accent = Rgb(tf.colors[L"accent"]);
+        t.onAccent = Luminance(t.accent) < 0.5f ? Rgb(0xFFFFFF) : Rgb(0x101014);
+        t.dark = Luminance(t.bg) < 0.5f;
+        t.hover = t.dark ? Rgb(0xFFFFFF, 0.075f) : Rgb(0x000000, 0.055f);
+        t.divider = t.dark ? Rgb(0xFFFFFF, 0.08f) : Rgb(0x000000, 0.09f);
+    }
     if (SystemBackdropSupported() && backdrop != L"solid") {
         t.backdrop = backdrop == L"mica" ? 2 : 3;
         t.opacity = opacity;
@@ -170,7 +348,27 @@ Theme BuildThemeNamed(const Config& c, const wchar_t* themeId) {
     return t;
 }
 
-Theme BuildTheme(const Config& c) { return BuildThemeNamed(c, c.theme.c_str()); }
+// High contrast: use the user's system colors and nothing decorative.
+static Theme HighContrastTheme(const Config& c) {
+    auto sys = [](int idx) { COLORREF v = GetSysColor(idx); return D2D1::ColorF(GetRValue(v) / 255.f, GetGValue(v) / 255.f, GetBValue(v) / 255.f, 1.0f); };
+    Theme t;
+    t.bg = sys(COLOR_WINDOW); t.bottomBg = t.bg; t.surface = t.bg; t.surfaceStrong = sys(COLOR_BTNFACE);
+    t.text = sys(COLOR_WINDOWTEXT); t.subtext = sys(COLOR_GRAYTEXT);
+    t.accent = sys(COLOR_HIGHLIGHT); t.onAccent = sys(COLOR_HIGHLIGHTTEXT);
+    t.hover = Alpha(sys(COLOR_HIGHLIGHT), 0.25f); t.divider = sys(COLOR_WINDOWTEXT);
+    t.scrim = Alpha(t.bg, 0.9f);
+    t.dark = Luminance(t.bg) < 0.5f;
+    t.radius = std::min(c.cornerRadius, 4.0f);
+    t.glow = false;
+    t.backdrop = 0;
+    t.opacity = 1.0f;
+    return t;
+}
+
+Theme BuildTheme(const Config& c) {
+    if (a11y::HighContrast()) return HighContrastTheme(c);
+    return BuildThemeNamed(c, c.theme.c_str());
+}
 
 void ApplyWindowTheme(HWND hwnd, const Theme& t, bool popup) {
     BOOL dark = t.dark;

@@ -19,7 +19,7 @@
 #include <cstdint>
 #include <iterator>
 
-#define FOYER_VERSION L"0.2.2"
+#define FOYER_VERSION L"0.3.0"
 
 // Marker placed in dwExtraInfo of every input event Foyer injects, so our own
 // hooks recognise and ignore them.
@@ -36,6 +36,9 @@ constexpr UINT WM_FOYER_QUIT          = WM_APP + 7;  // exit Foyer (sent by "Foy
 constexpr UINT WM_FOYER_START_FOUND   = WM_APP + 8;  // background Start-button scan finished
 constexpr UINT WM_FOYER_UPDATE        = WM_APP + 9;  // updater status changed
 constexpr UINT WM_FOYER_SETTINGS      = WM_APP + 10; // open settings; wParam = page index
+constexpr UINT WM_FOYER_FILES_READY   = WM_APP + 11; // lParam: search::FileResults*
+constexpr UINT WM_FOYER_RECENT_READY  = WM_APP + 12; // lParam: RecentResult*
+constexpr UINT WM_FOYER_OFFER_INSTALL = WM_APP + 13;
 
 // ---- menu.cpp ----
 HWND MenuCreate(HINSTANCE inst);
@@ -49,7 +52,7 @@ void MenuRefreshApps();
 HWND MenuWindow();
 
 // ---- settings.cpp ----
-enum SettingsPage { PageGeneral = 0, PageAppearance, PageLayout, PageApps, PageUpdates, PageAbout, PageCount };
+enum SettingsPage { PageGeneral = 0, PageAppearance, PageLayout, PageSearch, PageApps, PageUpdates, PageAbout, PageCount };
 void SettingsOpen(int page = -1);
 void SettingsOnUpdateStatus();    // refresh the Updates page
 bool SettingsIsOpen();

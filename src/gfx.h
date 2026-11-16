@@ -79,6 +79,17 @@ struct ThemePreset { const wchar_t* id; const wchar_t* name; };
 extern const ThemePreset kThemePresets[];
 extern const int kThemePresetCount;
 
+// Built-in presets followed by the user's theme files ("file:<name>").
+struct ThemeEntry { std::wstring id, name; };
+std::vector<ThemeEntry> ThemeList();
+// Theme files: { "name", "base", "accent", "backdrop", "opacity", "radius", "glow", "font",
+//                "colors": { "background", "bottom", "surface", "text", "subtext", "accent" } }
+bool ThemeExport(const Config& c, const std::wstring& path, const std::wstring& name);
+bool ThemeImport(const std::wstring& path, std::wstring* newId, std::wstring* error);
+bool ThemeDelete(const std::wstring& id);
+
+const wchar_t* MenuFont(const Config& c);   // the user's font, or the Windows UI font
+
 bool SystemBackdropSupported();      // Windows 11 22H2+
 bool WindowsUsesLightTheme();
 uint32_t WindowsAccentRgb();
