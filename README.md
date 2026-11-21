@@ -3,7 +3,7 @@
 A fast, clean, fully customizable replacement for the Windows 11 Start menu.
 Part of the larosa023 suite of lightweight Windows apps.
 
-**Status: v0.3.0** — Win key + Start button interception with fallbacks, search, pinned apps,
+**Status: v0.3.1** — Win key + Start button interception with fallbacks, search, pinned apps,
 full All apps list, account and power menus, a full settings window, themes (Dark, Light,
 Midnight, Glass, Ember, Ocean, Follow Windows) with acrylic/Mica, three layouts (Modern,
 Classic, Full screen), animations, and a built-in updater with automatic rollback.

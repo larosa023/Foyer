@@ -14,6 +14,7 @@
 #include "shortcuts.h"
 #include "system.h"
 #include "inputbox.h"
+#include "watch.h"
 #include <dwmapi.h>
 #include <shellscalingapi.h>
 #include <shellapi.h>
@@ -104,6 +105,11 @@ static bool g_iconsStale = false;
 
 static std::vector<RecentItem> g_recent;
 static DWORD g_lastRecent = 0;
+static bool g_appsDirty = true;      // set by the change watcher
+static bool g_recentDirty = true;
+static int g_refocusTries = 0;
+static std::wstring g_pendingFileQuery;
+static bool g_pendingFileScoped = false;
 
 static std::wstring g_query;
 static search::Query g_q;
@@ -156,6 +162,8 @@ constexpr UINT_PTR TIMER_CARET = 1;
 constexpr UINT_PTR TIMER_ANIM = 2;
 constexpr UINT_PTR TIMER_SAVEICONS = 3;
 constexpr UINT_PTR TIMER_FLASH = 4;
+constexpr UINT_PTR TIMER_REFOCUS = 5;
+constexpr UINT_PTR TIMER_FILESEARCH = 6;
 
 // ============================================================ helpers
 static double Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart / g_qpf.QuadPart; }
@@ -558,8 +566,12 @@ static void RebuildResults() {
         }
     }
     if (((all && g_config.searchFiles) || g_q.scope == search::Scope::Files) && g_q.text.size() >= 2) {
+        // wait for a short pause in typing so every keystroke doesn't start a disk search
         g_filesPending = true;
-        search::FilesSearchAsync(++g_searchGen, g_q.text, all ? 10 : 40, !all);
+        ++g_searchGen;
+        g_pendingFileQuery = g_q.text;
+        g_pendingFileScoped = !all;
+        SetTimer(g_hwnd, TIMER_FILESEARCH, 90, nullptr);
     }
     RebuildResultRows();
 }
@@ -1416,7 +1428,12 @@ static void PlaceWindow(POINT anchor) {
     GetMonitorInfoW(mon, &mi);
     UINT dx = 96, dy = 96;
     if (FAILED(GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dx, &dy))) dx = 96;
-    if (dx != g_dpi) { g_dpi = dx; DiscardDeviceResources(); }
+    if (dx != g_dpi) {
+        // Moving to a monitor with different scaling only needs the new DPI; icons and
+        // brushes stay valid, so the menu doesn't rebuild everything on every monitor switch.
+        g_dpi = dx;
+        if (g_rt) g_rt->SetDpi((float)g_dpi, (float)g_dpi);
+    }
 
     const RECT& mr = mi.rcMonitor;
     const RECT& w = mi.rcWork;
@@ -1489,7 +1506,9 @@ static void ForceForeground(HWND hwnd) {
 
 static void MaybeRefreshApps(bool force) {
     DWORD now = GetTickCount();
-    if (!force && g_appsLoaded && now - g_lastRefresh < 30000) return;
+    // Only when Windows reported a change (or as a safety net every half hour).
+    if (!force && g_appsLoaded && !g_appsDirty && now - g_lastRefresh < 30 * 60 * 1000) return;
+    g_appsDirty = false;
     g_lastRefresh = now;
     std::vector<std::wstring> have;
     if (!g_iconsStale) for (auto& kv : g_icons) have.push_back(kv.first);
@@ -1500,7 +1519,8 @@ static void MaybeRefreshApps(bool force) {
 static void MaybeRefreshRecent(bool force) {
     if (!g_config.recentEnabled) { g_recent.clear(); return; }
     DWORD now = GetTickCount();
-    if (!force && now - g_lastRecent < 3000) return;
+    if (!force && !g_recentDirty && now - g_lastRecent < 10 * 60 * 1000) return;
+    g_recentDirty = false;
     g_lastRecent = now;
     RecentRefreshAsync(g_hwnd, 12, g_config.hiddenRecent);
 }
@@ -1539,6 +1559,7 @@ void MenuHide() {
 
 static void MenuShow(bool fromMouse, POINT pt, bool preview) {
     double t0 = Now();
+    g_refocusTries = 6;   // "not retrying" unless the focus attempt below fails
     if (!fromMouse) GetCursorPos(&pt);
     else if (!preview) SendMaskKey();
     ResetState();
@@ -1554,7 +1575,13 @@ static void MenuShow(bool fromMouse, POINT pt, bool preview) {
     ValidateRect(g_hwnd, nullptr);
     if (!preview) {
         ForceForeground(g_hwnd);
-        if (GetForegroundWindow() != g_hwnd) Log(L"Warning: Windows did not give Foyer focus");
+        if (GetForegroundWindow() != g_hwnd) {
+            // Windows sometimes refuses the first attempt; a harmless injected key makes
+            // Foyer the "last input" process, after which it is allowed to take focus.
+            g_refocusTries = 0;
+            SendMaskKey();
+            SetTimer(g_hwnd, TIMER_REFOCUS, 15, nullptr);
+        }
     }
     SetTimer(g_hwnd, TIMER_CARET, GetCaretBlinkTime() ? GetCaretBlinkTime() : 530, nullptr);
     if (Animated()) StartAnim();
@@ -2550,7 +2577,7 @@ static LRESULT CALLBACK MenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_CLOSE: MenuHide(); return 0;
         case WM_TIMER:
             if (wParam == TIMER_CARET) {
-                if (!g_preview) {
+                if (!g_preview && g_refocusTries >= 6) {
                     HWND fg = GetForegroundWindow();
                     DWORD pid = 0;
                     if (fg) GetWindowThreadProcessId(fg, &pid);
@@ -2564,6 +2591,20 @@ static LRESULT CALLBACK MenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             } else if (wParam == TIMER_SAVEICONS) {
                 KillTimer(hwnd, TIMER_SAVEICONS);
                 IconCacheSave(g_iconPx, CollectIcons());
+            } else if (wParam == TIMER_REFOCUS) {
+                if (!MenuVisible() || GetForegroundWindow() == hwnd) { KillTimer(hwnd, TIMER_REFOCUS); return 0; }
+                ForceForeground(hwnd);
+                if (GetForegroundWindow() == hwnd) { KillTimer(hwnd, TIMER_REFOCUS); return 0; }
+                if (++g_refocusTries >= 6) {
+                    KillTimer(hwnd, TIMER_REFOCUS);
+                    Log(L"Warning: Windows did not give Foyer focus");
+                } else {
+                    SendMaskKey();
+                }
+            } else if (wParam == TIMER_FILESEARCH) {
+                KillTimer(hwnd, TIMER_FILESEARCH);
+                if (Searching() && !g_pendingFileQuery.empty())
+                    search::FilesSearchAsync(g_searchGen, g_pendingFileQuery, g_pendingFileScoped ? 40 : 10, g_pendingFileScoped);
             } else if (wParam == TIMER_FLASH) {
                 KillTimer(hwnd, TIMER_FLASH);
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -2652,6 +2693,12 @@ static LRESULT CALLBACK MenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_FOYER_SETTINGS: SettingsOpen((int)wParam); return 0;
         case WM_FOYER_UPDATE: AutoUpdateOnStatus(); return 0;
         case WM_FOYER_OFFER_INSTALL: MaybeOfferInstall(nullptr); return 0;
+        case WM_FOYER_CHANGED:
+            // Refresh in the background right away, so the next open already shows the change.
+            if (wParam & WatchApps) { g_appsDirty = true; MaybeRefreshApps(false); }
+            if (wParam & WatchRecent) { g_recentDirty = true; MaybeRefreshRecent(false); }
+            if (wParam & WatchFiles) search::FilesChanged();
+            return 0;
         case WM_FOYER_REFRESH_START: StartButtonRefreshAsync(nullptr); return 0;
         case WM_FOYER_START_FOUND: return 0;
         case WM_FOYER_APPS_READY: {
@@ -2784,8 +2831,14 @@ HWND MenuCreate(HINSTANCE inst) {
     RECT work; SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     ComputeMetrics(work);
     EnsureTarget();
-    RebuildTiles();          // pins show right away, before the app list has loaded
     LoadIconCache();
+    // The app list from last time, so the very first open after boot is complete.
+    if (AppCacheLoad(g_apps)) {
+        for (int i = 0; i < (int)g_apps.size(); ++i) g_appById[ToLower(g_apps[i].id)] = i;
+        g_appsLoaded = true;
+        Log(L"App cache: %u apps", (unsigned)g_apps.size());
+    }
+    RebuildRows();           // pins and All apps show right away
     MaybeRefreshApps(true);
     MaybeRefreshRecent(true);
     return g_hwnd;

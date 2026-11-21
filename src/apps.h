@@ -21,6 +21,9 @@ struct IconResult {
 // Enumerates apps on a background thread. Posts WM_FOYER_APPS_READY with an
 // AppListResult*, then one WM_FOYER_ICON_READY per app icon not in `haveIcons`.
 // The receiver owns (and must delete) the posted objects.
+bool AppCacheLoad(std::vector<AppEntry>& out);
+void AppCacheSave(const std::vector<AppEntry>& apps);
+
 void AppsRefreshAsync(HWND notify, std::vector<std::wstring> haveIcons, int iconPx);
 bool AppsRefreshRunning();
 

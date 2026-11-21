@@ -19,7 +19,7 @@
 #include <cstdint>
 #include <iterator>
 
-#define FOYER_VERSION L"0.3.0"
+#define FOYER_VERSION L"0.3.1"
 
 // Marker placed in dwExtraInfo of every input event Foyer injects, so our own
 // hooks recognise and ignore them.
@@ -39,6 +39,7 @@ constexpr UINT WM_FOYER_SETTINGS      = WM_APP + 10; // open settings; wParam = 
 constexpr UINT WM_FOYER_FILES_READY   = WM_APP + 11; // lParam: search::FileResults*
 constexpr UINT WM_FOYER_RECENT_READY  = WM_APP + 12; // lParam: RecentResult*
 constexpr UINT WM_FOYER_OFFER_INSTALL = WM_APP + 13;
+constexpr UINT WM_FOYER_CHANGED       = WM_APP + 14; // wParam: WatchFlags
 
 // ---- menu.cpp ----
 HWND MenuCreate(HINSTANCE inst);
@@ -100,7 +101,7 @@ void SendMaskKey();               // harmless injected key (gives us foreground 
 
 // ---- startbutton.cpp ----
 void StartButtonRefresh();        // synchronous scan (UI Automation)
-void StartButtonRefreshAsync(HWND notify);  // scan on a worker thread
+void StartButtonRefreshAsync(HWND notify, bool force = false);  // scan on a worker thread (skipped if nothing moved)
 bool StartButtonHitTest(POINT pt);// called from hook thread; cheap
 bool PointOnAnyTaskbar(POINT pt);
 

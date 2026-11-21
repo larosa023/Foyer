@@ -480,7 +480,12 @@ bool UserIsBusy() {
     if (fg && fg != GetDesktopWindow() && fg != GetShellWindow()) {
         wchar_t cls[64] = {};
         GetClassNameW(fg, cls, 64);
-        if (wcscmp(cls, L"WorkerW") != 0 && wcscmp(cls, L"Progman") != 0) {
+        // Ordinary maximized windows (browsers, editors) keep their caption style; borderless
+        // fullscreen games and video players don't. Without this, an auto-hiding taskbar makes
+        // every maximized window look like a game.
+        LONG style = GetWindowLongW(fg, GWL_STYLE);
+        bool captioned = (style & WS_CAPTION) == WS_CAPTION;
+        if (!captioned && !IsZoomed(fg) && wcscmp(cls, L"WorkerW") != 0 && wcscmp(cls, L"Progman") != 0) {
             RECT wr; MONITORINFO mi{sizeof(mi)};
             if (GetWindowRect(fg, &wr) && GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi) &&
                 wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top &&

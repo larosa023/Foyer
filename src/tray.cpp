@@ -140,7 +140,7 @@ void TrayOnCommand(HWND owner, UINT id) {
         case T_STARTUP: SetStartWithWindows(!StartWithWindowsEnabled()); break;
         case T_CONFIG: ShellOpen(L"notepad.exe", (L"\"" + DataDir() + L"\\config.json\"").c_str()); break;
         case T_LOGS: ShellOpen(DataDir().c_str()); break;
-        case T_RESCAN: StartButtonRefreshAsync(owner); break;
+        case T_RESCAN: StartButtonRefreshAsync(owner, true); break;
         case T_UNHIDE: g_config.hidden.clear(); ConfigSave(); MenuReloadConfig(); break;
         case T_SETTINGS: SettingsOpen(-1); break;
         case T_UPDATES: SettingsOpen(PageUpdates); if (!AutoUpdateAvailable()) AutoUpdateCheckNow(); break;

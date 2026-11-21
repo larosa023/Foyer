@@ -29,7 +29,9 @@ struct FileHit { std::wstring path, name, folder; bool dir = false; int score = 
 struct FileResults { unsigned gen = 0; std::vector<FileHit> hits; bool everything = false; bool indexing = false; };
 
 void FilesInit(HWND notify, UINT doneMsg);   // starts the background index (low priority)
-void FilesTouch();                            // the menu opened: refresh the index if it's stale
+void FilesTouch();                            // the menu opened: refresh the index if files changed
+void FilesChanged();                          // the watcher saw a change in an indexed folder
+std::vector<std::wstring> FilesRoots();       // the folders the index covers
 // Searches on a worker thread; posts doneMsg with a FileResults* (receiver deletes). Only the
 // latest request is answered, so typing fast never queues work.
 void FilesSearchAsync(unsigned gen, const std::wstring& q, size_t max, bool scoped);

@@ -11,6 +11,7 @@
 #include "config.h"
 #include "system.h"
 #include "search.h"
+#include "watch.h"
 #include <shellapi.h>
 #include <objbase.h>
 
@@ -77,10 +78,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     }
     TrayAdd(hwnd);
     AutoUpdateInit(hwnd, cmdLine);
-    StartButtonRefreshAsync(hwnd);
+    StartButtonRefreshAsync(hwnd, true);
     if (!HookStart(hwnd)) Log(L"Failed to start hook thread");
     if (HasArg(cmdLine, L"--settings")) SettingsOpen(-1);
     search::FilesInit(hwnd, WM_FOYER_FILES_READY);
+    WatchStart(hwnd, search::FilesRoots());
     if (!HasArg(cmdLine, L"--updated") && !HasArg(cmdLine, L"--installed")) PostMessageW(hwnd, WM_FOYER_OFFER_INSTALL, 0, 0);
     if (firstRun) TrayBalloon(L"Foyer is ready", L"Press the Windows key to open Foyer. Ctrl+Win still opens the original Start menu.");
 

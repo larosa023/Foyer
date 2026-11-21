@@ -164,6 +164,63 @@ static std::vector<std::wstring> HangarAppExes() {
     return out;
 }
 
+// ---------------------------------------------------------------- app list cache
+// The last app list is kept on disk so the full list is there the instant Foyer starts,
+// even before Windows has finished enumerating apps after boot.
+static std::wstring AppCachePath() { return DataDir() + L"\\apps.cache"; }
+
+void AppCacheSave(const std::vector<AppEntry>& apps) {
+    json::Value arr = json::Value::MakeArray();
+    for (auto& a : apps) {
+        json::Value o = json::Value::MakeObject();
+        o.Set(L"id", json::Value::Str(a.id));
+        o.Set(L"name", json::Value::Str(a.name));
+        if (!a.target.empty()) o.Set(L"target", json::Value::Str(a.target));
+        if (a.suite) o.Set(L"suite", json::Value::Boolean(true));
+        arr.arr.push_back(std::move(o));
+    }
+    std::wstring text;
+    json::Write(arr, text);
+    int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0, nullptr, nullptr);
+    std::string buf(n, '\0');
+    if (n) WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), &buf[0], n, nullptr, nullptr);
+    std::wstring tmp = AppCachePath() + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    bool ok = WriteFile(h, buf.data(), (DWORD)buf.size(), &w, nullptr) && w == buf.size();
+    CloseHandle(h);
+    if (ok) MoveFileExW(tmp.c_str(), AppCachePath().c_str(), MOVEFILE_REPLACE_EXISTING);
+    else DeleteFileW(tmp.c_str());
+}
+
+bool AppCacheLoad(std::vector<AppEntry>& out) {
+    HANDLE h = CreateFileW(AppCachePath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD size = GetFileSize(h, nullptr), read = 0;
+    std::string buf(size < 8 * 1024 * 1024 ? size : 0, '\0');
+    bool ok = !buf.empty() && ReadFile(h, &buf[0], size, &read, nullptr) && read == size;
+    CloseHandle(h);
+    if (!ok) return false;
+    int n = MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)read, nullptr, 0);
+    std::wstring text(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)read, &text[0], n);
+    json::Value root;
+    json::Parser parser(text);
+    if (!parser.Parse(root) || root.type != json::Value::Array) return false;
+    for (auto& v : root.arr) {
+        AppEntry e;
+        e.id = v.GetStr(L"id");
+        e.name = v.GetStr(L"name");
+        e.target = v.GetStr(L"target");
+        e.suite = v.GetBool(L"suite", false);
+        if (e.id.empty() || e.name.empty()) continue;
+        e.nameLower = ToLower(e.name);
+        out.push_back(std::move(e));
+    }
+    return !out.empty();
+}
+
 static DWORD WINAPI RefreshThread(LPVOID p) {
     RefreshArgs* args = static_cast<RefreshArgs*>(p);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -251,6 +308,7 @@ static DWORD WINAPI RefreshThread(LPVOID p) {
     std::vector<std::wstring> ids;
     for (auto& a : result->apps) ids.push_back(a.id);
     size_t count = result->apps.size();
+    AppCacheSave(result->apps);
     if (!PostMessageW(args->notify, WM_FOYER_APPS_READY, 0, (LPARAM)result)) delete result;
     Log(L"Enumerated %u apps in %lu ms", (unsigned)count, GetTickCount() - t0);
 

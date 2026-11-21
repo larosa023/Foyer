@@ -387,34 +387,93 @@ static void Walk(Index& idx, const std::wstring& dir, uint32_t parent, int depth
         if (idx.entries.size() >= kMaxEntries) break;
     } while (FindNextFileW(f, &fd));
     FindClose(f);
+    static thread_local unsigned dirsWalked = 0;
     for (auto& sd : subdirs) {
-        while (updater::UserIsBusy()) Sleep(5000);   // never compete with a game
+        if ((++dirsWalked & 63) == 0)
+            while (updater::UserIsBusy()) Sleep(5000);   // never compete with a game
         Walk(idx, sd.first, sd.second, depth + 1);
     }
 }
 
+std::vector<std::wstring> FilesRoots() {
+    const KNOWNFOLDERID* ids[] = {&FOLDERID_Desktop, &FOLDERID_Documents, &FOLDERID_Downloads, &FOLDERID_Pictures,
+                                  &FOLDERID_Music, &FOLDERID_Videos, &FOLDERID_SkyDrive};
+    std::vector<std::wstring> roots;
+    for (auto id : ids) {
+        std::wstring p = KnownFolderPath(*id);
+        if (p.empty() || GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        // skip roots inside another root (Documents inside OneDrive)
+        bool nested = false;
+        for (auto& r : roots) if (p.size() > r.size() && _wcsnicmp(p.c_str(), r.c_str(), r.size()) == 0 && p[r.size()] == L'\\') nested = true;
+        if (nested) continue;
+        roots.erase(std::remove_if(roots.begin(), roots.end(), [&](const std::wstring& r) {
+            return r.size() > p.size() && _wcsnicmp(r.c_str(), p.c_str(), p.size()) == 0 && r[p.size()] == L'\\';
+        }), roots.end());
+        roots.push_back(p);
+    }
+    return roots;
+}
+
+// ---- saved index: the last index is kept on disk so file search works the moment Foyer starts
+static std::wstring IndexPath() { return DataDir() + L"\\files.index"; }
+
+static void SaveIndex(const Index& idx) {
+    std::wstring tmp = IndexPath() + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    bool ok = true;
+    auto put = [&](const void* p, size_t n) { if (ok) ok = WriteFile(h, p, (DWORD)n, &w, nullptr) && w == n; };
+    uint32_t magic = 0x31584946 /* "FIX1" */, nEntries = (uint32_t)idx.entries.size(), nPool = (uint32_t)idx.pool.size(), nRoots = (uint32_t)idx.roots.size();
+    put(&magic, 4); put(&nEntries, 4); put(&nPool, 4); put(&nRoots, 4);
+    for (auto& r : idx.roots) { uint32_t len = (uint32_t)r.size(); put(&len, 4); put(r.data(), len * 2); }
+    put(idx.entries.data(), idx.entries.size() * sizeof(Entry));
+    put(idx.pool.data(), idx.pool.size() * 2);
+    CloseHandle(h);
+    if (ok) MoveFileExW(tmp.c_str(), IndexPath().c_str(), MOVEFILE_REPLACE_EXISTING);
+    else DeleteFileW(tmp.c_str());
+}
+
+static std::shared_ptr<Index> LoadIndex() {
+    HANDLE h = CreateFileW(IndexPath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return nullptr;
+    auto idx = std::make_shared<Index>();
+    DWORD r = 0;
+    bool ok = true;
+    auto get = [&](void* p, size_t n) { if (ok) ok = ReadFile(h, p, (DWORD)n, &r, nullptr) && r == n; };
+    uint32_t magic = 0, nEntries = 0, nPool = 0, nRoots = 0;
+    get(&magic, 4); get(&nEntries, 4); get(&nPool, 4); get(&nRoots, 4);
+    ok = ok && magic == 0x31584946 && nEntries <= kMaxEntries + 64 && nPool < 64u * 1024 * 1024 && nRoots < 64;
+    for (uint32_t i = 0; ok && i < nRoots; ++i) {
+        uint32_t len = 0; get(&len, 4);
+        if (!ok || len > 4096) { ok = false; break; }
+        std::wstring root(len, L'\0'); get(root.data(), len * 2);
+        idx->roots.push_back(root);
+    }
+    if (ok) { idx->entries.resize(nEntries); get(idx->entries.data(), nEntries * sizeof(Entry)); }
+    if (ok) { idx->pool.resize(nPool); get(idx->pool.data(), nPool * 2); }
+    CloseHandle(h);
+    if (!ok) return nullptr;
+    for (auto& e : idx->entries)   // never trust offsets from disk
+        if ((size_t)e.nameOff + e.nameLen > idx->pool.size() || (e.parent != 0xFFFFFFFF && e.parent >= nEntries)) return nullptr;
+    return idx;
+}
+
+static std::atomic<bool> s_dirty{true};       // indexed folders changed since the last build
+static DWORD s_lastBuildStart = 0;
+
+void FilesChanged() { s_dirty = true; }
+
 static void BuildIndex() {
     bool expected = false;
     if (!s_building.compare_exchange_strong(expected, true)) return;
+    s_dirty = false;          // changes from here on mark it dirty again
+    s_lastBuildStart = GetTickCount();
     std::thread([] {
         SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
         DWORD t0 = GetTickCount();
         auto idx = std::make_shared<Index>();
-        const KNOWNFOLDERID* ids[] = {&FOLDERID_Desktop, &FOLDERID_Documents, &FOLDERID_Downloads, &FOLDERID_Pictures,
-                                      &FOLDERID_Music, &FOLDERID_Videos, &FOLDERID_SkyDrive};
-        std::vector<std::wstring> roots;
-        for (auto id : ids) {
-            std::wstring p = KnownFolderPath(*id);
-            if (p.empty() || GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-            // skip roots inside another root (Documents inside OneDrive)
-            bool nested = false;
-            for (auto& r : roots) if (p.size() > r.size() && _wcsnicmp(p.c_str(), r.c_str(), r.size()) == 0 && p[r.size()] == L'\\') nested = true;
-            if (nested) continue;
-            roots.erase(std::remove_if(roots.begin(), roots.end(), [&](const std::wstring& r) {
-                return r.size() > p.size() && _wcsnicmp(r.c_str(), p.c_str(), p.size()) == 0 && r[p.size()] == L'\\';
-            }), roots.end());
-            roots.push_back(p);
-        }
+        std::vector<std::wstring> roots = FilesRoots();
         idx->roots = roots;
         for (size_t r = 0; r < roots.size(); ++r) {
             // a synthetic entry per root so paths can be rebuilt from parent links
@@ -428,6 +487,7 @@ static void BuildIndex() {
         s_index = idx;
         ReleaseSRWLockExclusive(&s_idxLock);
         SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+        SaveIndex(*idx);
         Log(L"File index: %u items in %lu ms (%u KB)", (unsigned)idx->entries.size(), GetTickCount() - t0,
             (unsigned)((idx->pool.size() * 2 + idx->entries.size() * sizeof(Entry)) / 1024));
         s_building = false;
@@ -452,13 +512,26 @@ static std::wstring EntryPath(const Index& idx, uint32_t i) {
 void FilesInit(HWND notify, UINT doneMsg) {
     s_notify = notify;
     s_doneMsg = doneMsg;
-    // first build shortly after start-up, so it never slows boot
-    std::thread([] { Sleep(45000); BuildIndex(); }).detach();
+    std::thread([] {
+        // the saved index makes file search work right away; a fresh one follows once boot has settled
+        if (auto saved = LoadIndex()) {
+            saved->builtAt = GetTickCount();
+            AcquireSRWLockExclusive(&s_idxLock);
+            if (!s_index) s_index = saved;
+            ReleaseSRWLockExclusive(&s_idxLock);
+            Log(L"File index: loaded %u saved items", (unsigned)saved->entries.size());
+        }
+        Sleep(45000);
+        BuildIndex();
+    }).detach();
 }
 
+// Called when the menu opens. Rebuilds only if the watched folders changed, at most every
+// few minutes (a build takes about a second at background priority).
 void FilesTouch() {
     auto idx = CurrentIndex();
-    if (idx && GetTickCount() - idx->builtAt > 15 * 60 * 1000) BuildIndex();
+    if (!idx) return;
+    if (s_dirty && GetTickCount() - s_lastBuildStart > 3 * 60 * 1000) BuildIndex();
 }
 
 // ---------------------------------------------------------------- Everything (voidtools) IPC
